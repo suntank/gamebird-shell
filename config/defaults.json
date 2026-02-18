@@ -1,0 +1,32 @@
+{
+  "library": {
+    "roots": [
+      "./roms",
+      "./apps"
+    ]
+  },
+  "cache": {
+    "metadata_dir": "~/.local/share/gamebird-shell/metadata",
+    "thumb_dir": "~/.local/share/gamebird-shell/thumbs",
+    "max_thumb_files": 2000,
+    "max_thumb_bytes": 134217728
+  },
+  "ui": {
+    "theme": "classic",
+    "list_style": "compact",
+    "show_diagnostics": true
+  },
+  "input": {
+    "repeat_delay_ms": 220,
+    "repeat_rate_ms": 80,
+    "acceleration_step": 4
+  },
+  "launch": {
+    "default_timeout_seconds": 0,
+    "force_kill_combo": "start+select"
+  },
+  "scrape": {
+    "enabled": false,
+    "provider": "none"
+  }
+}

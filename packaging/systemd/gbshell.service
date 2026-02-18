@@ -1,0 +1,22 @@
+[Unit]
+Description=GameBird Shell UI
+After=network-online.target gblibd.service systemd-user-sessions.service
+Wants=network-online.target gblibd.service
+Conflicts=getty@tty1.service
+Before=getty@tty1.service
+
+[Service]
+Type=simple
+User=gamebird
+Group=gamebird
+WorkingDirectory=/home/gamebird/gamebird-shell
+ExecStart=/home/gamebird/gamebird-shell/build/gbshell --presenter fbdev --fbdev /dev/fb0 --db /home/gamebird/gamebird-shell/data/catalog.db --defaults /home/gamebird/gamebird-shell/config/defaults.pi.json --systems-dir /home/gamebird/gamebird-shell/config/systems.d --settings /home/gamebird/gamebird-shell/config/user_settings.json
+Restart=always
+RestartSec=1
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+
+[Install]
+WantedBy=multi-user.target

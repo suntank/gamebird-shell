@@ -1,0 +1,16 @@
+[Unit]
+Description=GameBird Shell Library Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gamebird
+Group=gamebird
+WorkingDirectory=/home/gamebird/gamebird-shell
+ExecStart=/home/gamebird/gamebird-shell/build/gblibd --db /home/gamebird/gamebird-shell/data/catalog.db --defaults /home/gamebird/gamebird-shell/config/defaults.pi.json --systems-dir /home/gamebird/gamebird-shell/config/systems.d --daemon --poll-seconds 2
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+{
+  "id": "snes",
+  "name": "Super Nintendo",
+  "rom_extensions": [".smc", ".sfc", ".zip", ".7z"],
+  "launch_type": "retroarch",
+  "launch_template": "retroarch --appendconfig /home/gamebird/gamebird-shell/config/retroarch-gamebird.cfg -L /home/gamebird/.config/retroarch/cores/snes9x_libretro.so {rom_path}",
+  "extra_args": ""
+}
