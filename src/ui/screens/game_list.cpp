@@ -22,7 +22,7 @@ void DrawGameList(render::Surface240& surface,
   if (!status.empty()) {
     widgets::DrawText(surface, 16, 196, status, theme.text_dim, 1);
   }
-  widgets::DrawText(surface, 16, 210, "A:RUN ST:OPT X:FAV Y:HIDE", theme.text_dim, 1);
+  widgets::DrawText(surface, 16, 210, "A:RUN R:INFO X:FAV Y:HIDE", theme.text_dim, 1);
 }
 
 }  // namespace gb::ui::screens

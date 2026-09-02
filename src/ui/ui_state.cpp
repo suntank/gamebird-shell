@@ -94,6 +94,8 @@ const char* ScreenName(const Screen screen) {
       return "TOOLS";
     case Screen::InputSetup:
       return "INPUT";
+    case Screen::InputTest:
+      return "INPUT TEST";
     case Screen::Bluetooth:
       return "BT";
     case Screen::LaunchOptions:

@@ -18,12 +18,22 @@ struct SystemRecord {
 
 struct GameRecord {
   std::string system_id;
+  std::string library_root;
   std::string path;
   std::string filename;
   std::string title;
   std::string sort_title;
   std::int64_t size_bytes = 0;
   std::int64_t mtime = 0;
+};
+
+struct LibraryRootState {
+  std::string root_path;
+  std::string status;
+  std::string error;
+  std::int64_t device_id = 0;
+  std::int64_t last_scan_at = 0;
+  int files_seen = 0;
 };
 
 struct ScanSummary {
@@ -45,6 +55,30 @@ struct GameSummary {
   std::string filename;
   bool is_favorite = false;
   bool is_hidden = false;
+};
+
+struct GameDetails {
+  int id = 0;
+  std::string system_id;
+  std::string system_name;
+  std::string title;
+  std::string filename;
+  bool is_favorite = false;
+  bool is_hidden = false;
+  int release_year = 0;
+  std::string genre;
+  int players = 0;
+  std::string description;
+  std::string metadata_source;
+  std::string box_art_path;
+};
+
+struct AssetCandidate {
+  int game_id = 0;
+  std::string system_id;
+  std::string title;
+  std::string filename;
+  std::string rom_path;
 };
 
 struct LaunchInfo {
@@ -101,6 +135,17 @@ class Database {
 
   bool InitSchema();
   bool BeginIncrementalScan();
+  bool AbortIncrementalScan();
+  bool MarkGamesMissingUnderRoot(const std::string& root_path,
+                                 const std::vector<std::string>& legacy_prefixes);
+  bool CountGamesUnderRoot(const std::string& root_path,
+                           const std::vector<std::string>& legacy_prefixes,
+                           int& count);
+  bool GetLibraryRootState(const std::string& root_path,
+                           LibraryRootState& out,
+                           bool& found);
+  bool ListLibraryRoots(std::vector<LibraryRootState>& out);
+  bool UpsertLibraryRootState(const LibraryRootState& root);
   bool UpsertSystem(const SystemRecord& system);
   bool UpsertGame(const GameRecord& game);
   bool EndIncrementalScan(bool hide_missing);
@@ -108,10 +153,20 @@ class Database {
   bool ListGamesBySystem(const std::string& system_id,
                          bool include_hidden,
                          std::vector<GameSummary>& out);
+  bool ListRecentGames(bool include_hidden,
+                       int limit,
+                       std::vector<GameSummary>& out);
+  bool ListFavoriteGames(bool include_hidden,
+                         std::vector<GameSummary>& out);
+  bool GetGameDetails(int game_id, GameDetails& out);
+  bool ListPresentAssetCandidates(std::vector<AssetCandidate>& out);
+  bool UpsertGameBoxArt(int game_id, const std::string& box_art_path);
   bool ToggleGameFavorite(int game_id, bool& new_value);
   bool ToggleGameHidden(int game_id, bool& new_value);
   bool GetLaunchInfo(int game_id, LaunchInfo& out);
+  bool ListPresentLaunchInfos(std::vector<LaunchInfo>& out);
   bool GetSystemLaunchInfo(const std::string& system_id, LaunchInfo& out);
+  bool ListLaunchOverrides(std::vector<LaunchOverride>& out);
   bool GetLaunchOverride(const std::string& scope_type,
                          const std::string& scope_id,
                          LaunchOverride& out);
@@ -136,6 +191,7 @@ class Database {
  private:
   bool Exec(const std::string& sql);
   bool EnsureGamesPresenceColumn();
+  bool EnsureGamesLibraryRootColumn();
   bool QuerySingleInt(const std::string& sql, int& value) const;
   void SetError(const std::string& message);
 

@@ -15,6 +15,7 @@ enum class Screen {
   Settings,
   Tools,
   InputSetup,
+  InputTest,
   Bluetooth,
   LaunchOptions,
 };

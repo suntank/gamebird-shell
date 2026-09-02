@@ -188,7 +188,9 @@ bool SDLPresenter::WaitAndPoll(InputFrame& out, const int timeout_ms) {
                              .is_keyboard = true,
                              .raw_type = static_cast<std::uint16_t>(SDL_KEYDOWN),
                              .raw_code = static_cast<std::uint16_t>(ev.key.keysym.scancode),
-                             .raw_value = ev.key.repeat == 0 ? 1 : 2});
+                             .raw_value = ev.key.repeat == 0 ? 1 : 2,
+                             .retroarch_joypad_index = -1,
+                             .retroarch_binding = {}});
             }
           } else {
             out.events.push_back(
@@ -199,7 +201,9 @@ bool SDLPresenter::WaitAndPoll(InputFrame& out, const int timeout_ms) {
                            .is_keyboard = true,
                            .raw_type = static_cast<std::uint16_t>(SDL_KEYDOWN),
                            .raw_code = static_cast<std::uint16_t>(ev.key.keysym.scancode),
-                           .raw_value = ev.key.repeat == 0 ? 1 : 2});
+                           .raw_value = ev.key.repeat == 0 ? 1 : 2,
+                           .retroarch_joypad_index = -1,
+                           .retroarch_binding = {}});
           }
         }
         break;
@@ -214,7 +218,9 @@ bool SDLPresenter::WaitAndPoll(InputFrame& out, const int timeout_ms) {
                          .device_path = "sdl://controller",
                          .raw_type = static_cast<std::uint16_t>(SDL_CONTROLLERBUTTONDOWN),
                          .raw_code = static_cast<std::uint16_t>(ev.cbutton.button),
-                         .raw_value = 1});
+                         .raw_value = 1,
+                         .retroarch_joypad_index = 0,
+                         .retroarch_binding = {}});
         }
         break;
       }

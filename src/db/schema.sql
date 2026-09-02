@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS systems (
 CREATE TABLE IF NOT EXISTS games (
   id INTEGER PRIMARY KEY,
   system_id TEXT NOT NULL REFERENCES systems(id),
+  library_root TEXT,
   path TEXT NOT NULL UNIQUE,
   filename TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -24,6 +25,16 @@ CREATE TABLE IF NOT EXISTS games (
 
 CREATE INDEX IF NOT EXISTS idx_games_system ON games(system_id);
 CREATE INDEX IF NOT EXISTS idx_games_present ON games(is_present);
+CREATE INDEX IF NOT EXISTS idx_games_library_root ON games(library_root);
+
+CREATE TABLE IF NOT EXISTS library_roots (
+  root_path TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  device_id INTEGER NOT NULL DEFAULT 0,
+  last_scan_at INTEGER NOT NULL,
+  files_seen INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS game_metadata (
   game_id INTEGER PRIMARY KEY REFERENCES games(id),

@@ -56,6 +56,7 @@ std::string SchemaSql() {
       "CREATE TABLE IF NOT EXISTS games (",
       "  id INTEGER PRIMARY KEY,",
       "  system_id TEXT NOT NULL REFERENCES systems(id),",
+      "  library_root TEXT,",
       "  path TEXT NOT NULL UNIQUE,",
       "  filename TEXT NOT NULL,",
       "  title TEXT NOT NULL,",
@@ -71,6 +72,15 @@ std::string SchemaSql() {
       "",
       "CREATE INDEX IF NOT EXISTS idx_games_system ON games(system_id);",
       "CREATE INDEX IF NOT EXISTS idx_games_present ON games(is_present);",
+      "",
+      "CREATE TABLE IF NOT EXISTS library_roots (",
+      "  root_path TEXT PRIMARY KEY,",
+      "  status TEXT NOT NULL,",
+      "  error TEXT NOT NULL DEFAULT '',",
+      "  device_id INTEGER NOT NULL DEFAULT 0,",
+      "  last_scan_at INTEGER NOT NULL,",
+      "  files_seen INTEGER NOT NULL DEFAULT 0",
+      ");",
       "",
       "CREATE TABLE IF NOT EXISTS game_metadata (",
       "  game_id INTEGER PRIMARY KEY REFERENCES games(id),",
@@ -181,7 +191,11 @@ bool Database::InitSchema() {
     return false;
   }
 
-  Exec("PRAGMA user_version=1;");
+  if (!EnsureGamesLibraryRootColumn()) {
+    return false;
+  }
+
+  Exec("PRAGMA user_version=2;");
   return true;
 }
 
@@ -212,12 +226,173 @@ bool Database::EnsureGamesPresenceColumn() {
   return true;
 }
 
-bool Database::BeginIncrementalScan() {
-  if (!Exec("BEGIN IMMEDIATE TRANSACTION;")) {
+bool Database::EnsureGamesLibraryRootColumn() {
+  Statement stmt(db_, "PRAGMA table_info(games);");
+  if (!stmt.Ok()) {
+    SetError("failed to query games schema");
     return false;
   }
-  if (!Exec("UPDATE games SET is_present=0;")) {
-    Exec("ROLLBACK;");
+
+  bool found = false;
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    const auto* name_txt = sqlite3_column_text(stmt.Get(), 1);
+    const std::string name =
+        name_txt ? reinterpret_cast<const char*>(name_txt) : "";
+    if (name == "library_root") {
+      found = true;
+      break;
+    }
+  }
+
+  if (!found && !Exec("ALTER TABLE games ADD COLUMN library_root TEXT;")) {
+    return false;
+  }
+  return Exec("CREATE INDEX IF NOT EXISTS idx_games_library_root ON games(library_root);");
+}
+
+bool Database::BeginIncrementalScan() {
+  return Exec("BEGIN IMMEDIATE TRANSACTION;");
+}
+
+bool Database::AbortIncrementalScan() { return Exec("ROLLBACK;"); }
+
+bool Database::MarkGamesMissingUnderRoot(
+    const std::string& root_path,
+    const std::vector<std::string>& legacy_prefixes) {
+  std::string sql =
+      "UPDATE games SET is_present=0 WHERE library_root=?1";
+  for (std::size_t i = 0; i < legacy_prefixes.size(); ++i) {
+    sql += " OR (library_root IS NULL AND (path=?" + std::to_string(i + 2) +
+           " OR substr(path,1,length(?" + std::to_string(i + 2) + ") + 1)=" +
+           "?" + std::to_string(i + 2) + " || '/'))";
+  }
+  sql += ";";
+
+  Statement stmt(db_, sql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare MarkGamesMissingUnderRoot");
+    return false;
+  }
+  sqlite3_bind_text(stmt.Get(), 1, root_path.c_str(), -1, SQLITE_TRANSIENT);
+  for (std::size_t i = 0; i < legacy_prefixes.size(); ++i) {
+    sqlite3_bind_text(stmt.Get(), static_cast<int>(i + 2),
+                      legacy_prefixes[i].c_str(), -1, SQLITE_TRANSIENT);
+  }
+  if (sqlite3_step(stmt.Get()) != SQLITE_DONE) {
+    SetError("failed to mark games missing under root: " + root_path);
+    return false;
+  }
+  return true;
+}
+
+bool Database::CountGamesUnderRoot(
+    const std::string& root_path,
+    const std::vector<std::string>& legacy_prefixes,
+    int& count) {
+  count = 0;
+  std::string sql = "SELECT COUNT(*) FROM games WHERE library_root=?1";
+  for (std::size_t i = 0; i < legacy_prefixes.size(); ++i) {
+    sql += " OR (library_root IS NULL AND (path=?" + std::to_string(i + 2) +
+           " OR substr(path,1,length(?" + std::to_string(i + 2) + ") + 1)=" +
+           "?" + std::to_string(i + 2) + " || '/'))";
+  }
+  sql += ";";
+  Statement stmt(db_, sql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare CountGamesUnderRoot");
+    return false;
+  }
+  sqlite3_bind_text(stmt.Get(), 1, root_path.c_str(), -1, SQLITE_TRANSIENT);
+  for (std::size_t i = 0; i < legacy_prefixes.size(); ++i) {
+    sqlite3_bind_text(stmt.Get(), static_cast<int>(i + 2),
+                      legacy_prefixes[i].c_str(), -1, SQLITE_TRANSIENT);
+  }
+  if (sqlite3_step(stmt.Get()) != SQLITE_ROW) {
+    SetError("failed to count games under root: " + root_path);
+    return false;
+  }
+  count = sqlite3_column_int(stmt.Get(), 0);
+  return true;
+}
+
+bool Database::GetLibraryRootState(const std::string& root_path,
+                                   LibraryRootState& out,
+                                   bool& found) {
+  found = false;
+  Statement stmt(db_,
+                 "SELECT root_path,status,error,device_id,last_scan_at,files_seen "
+                 "FROM library_roots WHERE root_path=?1;");
+  if (!stmt.Ok()) {
+    SetError("failed to prepare GetLibraryRootState");
+    return false;
+  }
+  sqlite3_bind_text(stmt.Get(), 1, root_path.c_str(), -1, SQLITE_TRANSIENT);
+  const int rc = sqlite3_step(stmt.Get());
+  if (rc == SQLITE_DONE) {
+    return true;
+  }
+  if (rc != SQLITE_ROW) {
+    SetError("failed to query library root: " + root_path);
+    return false;
+  }
+  const auto text = [&](const int column) {
+    const auto* value = sqlite3_column_text(stmt.Get(), column);
+    return value ? std::string(reinterpret_cast<const char*>(value)) : std::string{};
+  };
+  out.root_path = text(0);
+  out.status = text(1);
+  out.error = text(2);
+  out.device_id = sqlite3_column_int64(stmt.Get(), 3);
+  out.last_scan_at = sqlite3_column_int64(stmt.Get(), 4);
+  out.files_seen = sqlite3_column_int(stmt.Get(), 5);
+  found = true;
+  return true;
+}
+
+bool Database::ListLibraryRoots(std::vector<LibraryRootState>& out) {
+  out.clear();
+  Statement stmt(db_,
+                 "SELECT root_path,status,error,device_id,last_scan_at,files_seen "
+                 "FROM library_roots ORDER BY root_path COLLATE NOCASE;");
+  if (!stmt.Ok()) {
+    SetError("failed to prepare ListLibraryRoots");
+    return false;
+  }
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    const auto text = [&](const int column) {
+      const auto* value = sqlite3_column_text(stmt.Get(), column);
+      return value ? std::string(reinterpret_cast<const char*>(value)) : std::string{};
+    };
+    LibraryRootState row;
+    row.root_path = text(0);
+    row.status = text(1);
+    row.error = text(2);
+    row.device_id = sqlite3_column_int64(stmt.Get(), 3);
+    row.last_scan_at = sqlite3_column_int64(stmt.Get(), 4);
+    row.files_seen = sqlite3_column_int(stmt.Get(), 5);
+    out.push_back(std::move(row));
+  }
+  return true;
+}
+
+bool Database::UpsertLibraryRootState(const LibraryRootState& root) {
+  Statement stmt(db_,
+                 "INSERT INTO library_roots(root_path,status,error,device_id,last_scan_at,files_seen) "
+                 "VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(root_path) DO UPDATE SET "
+                 "status=excluded.status,error=excluded.error,device_id=excluded.device_id,"
+                 "last_scan_at=excluded.last_scan_at,files_seen=excluded.files_seen;");
+  if (!stmt.Ok()) {
+    SetError("failed to prepare UpsertLibraryRootState");
+    return false;
+  }
+  sqlite3_bind_text(stmt.Get(), 1, root.root_path.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt.Get(), 2, root.status.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt.Get(), 3, root.error.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt.Get(), 4, root.device_id);
+  sqlite3_bind_int64(stmt.Get(), 5, root.last_scan_at);
+  sqlite3_bind_int(stmt.Get(), 6, root.files_seen);
+  if (sqlite3_step(stmt.Get()) != SQLITE_DONE) {
+    SetError("failed to update library root: " + root.root_path);
     return false;
   }
   return true;
@@ -260,10 +435,11 @@ bool Database::UpsertSystem(const SystemRecord& system) {
 
 bool Database::UpsertGame(const GameRecord& game) {
   static const std::string kSql =
-      "INSERT INTO games(system_id,path,filename,title,sort_title,size_bytes,mtime,is_present) "
-      "VALUES(?,?,?,?,?,?,?,1) "
+      "INSERT INTO games(system_id,library_root,path,filename,title,sort_title,size_bytes,mtime,is_present) "
+      "VALUES(?,?,?,?,?,?,?,?,1) "
       "ON CONFLICT(path) DO UPDATE SET "
       "system_id=excluded.system_id, "
+      "library_root=excluded.library_root, "
       "filename=excluded.filename, "
       "title=excluded.title, "
       "sort_title=excluded.sort_title, "
@@ -279,16 +455,18 @@ bool Database::UpsertGame(const GameRecord& game) {
 
   sqlite3_bind_text(stmt.Get(), 1, game.system_id.c_str(), -1,
                     SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt.Get(), 2, game.path.c_str(), -1,
+  sqlite3_bind_text(stmt.Get(), 2, game.library_root.c_str(), -1,
                     SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt.Get(), 3, game.filename.c_str(), -1,
+  sqlite3_bind_text(stmt.Get(), 3, game.path.c_str(), -1,
                     SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt.Get(), 4, game.title.c_str(), -1,
+  sqlite3_bind_text(stmt.Get(), 4, game.filename.c_str(), -1,
                     SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt.Get(), 5, game.sort_title.c_str(), -1,
+  sqlite3_bind_text(stmt.Get(), 5, game.title.c_str(), -1,
                     SQLITE_TRANSIENT);
-  sqlite3_bind_int64(stmt.Get(), 6, game.size_bytes);
-  sqlite3_bind_int64(stmt.Get(), 7, game.mtime);
+  sqlite3_bind_text(stmt.Get(), 6, game.sort_title.c_str(), -1,
+                    SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt.Get(), 7, game.size_bytes);
+  sqlite3_bind_int64(stmt.Get(), 8, game.mtime);
 
   if (sqlite3_step(stmt.Get()) != SQLITE_DONE) {
     SetError("failed to execute UpsertGame");
@@ -380,6 +558,153 @@ bool Database::ListGamesBySystem(const std::string& system_id,
     out.push_back(std::move(row));
   }
 
+  return true;
+}
+
+bool Database::ListRecentGames(const bool include_hidden,
+                               const int limit,
+                               std::vector<GameSummary>& out) {
+  out.clear();
+  const std::string sql =
+      include_hidden
+          ? "SELECT id,title,filename,is_favorite,is_hidden FROM games "
+            "WHERE is_present=1 AND last_played IS NOT NULL "
+            "ORDER BY last_played DESC,sort_title COLLATE NOCASE LIMIT ?1;"
+          : "SELECT id,title,filename,is_favorite,is_hidden FROM games "
+            "WHERE is_present=1 AND is_hidden=0 AND last_played IS NOT NULL "
+            "ORDER BY last_played DESC,sort_title COLLATE NOCASE LIMIT ?1;";
+  Statement stmt(db_, sql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare ListRecentGames");
+    return false;
+  }
+  sqlite3_bind_int(stmt.Get(), 1, limit > 0 ? limit : 30);
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    GameSummary row;
+    row.id = sqlite3_column_int(stmt.Get(), 0);
+    const auto* title = sqlite3_column_text(stmt.Get(), 1);
+    const auto* filename = sqlite3_column_text(stmt.Get(), 2);
+    row.title = title ? reinterpret_cast<const char*>(title) : "";
+    row.filename = filename ? reinterpret_cast<const char*>(filename) : "";
+    row.is_favorite = sqlite3_column_int(stmt.Get(), 3) != 0;
+    row.is_hidden = sqlite3_column_int(stmt.Get(), 4) != 0;
+    out.push_back(std::move(row));
+  }
+  return true;
+}
+
+bool Database::ListFavoriteGames(const bool include_hidden,
+                                 std::vector<GameSummary>& out) {
+  out.clear();
+  const std::string sql =
+      include_hidden
+          ? "SELECT id,title,filename,is_favorite,is_hidden FROM games "
+            "WHERE is_present=1 AND is_favorite=1 "
+            "ORDER BY sort_title COLLATE NOCASE;"
+          : "SELECT id,title,filename,is_favorite,is_hidden FROM games "
+            "WHERE is_present=1 AND is_hidden=0 AND is_favorite=1 "
+            "ORDER BY sort_title COLLATE NOCASE;";
+  Statement stmt(db_, sql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare ListFavoriteGames");
+    return false;
+  }
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    GameSummary row;
+    row.id = sqlite3_column_int(stmt.Get(), 0);
+    const auto* title = sqlite3_column_text(stmt.Get(), 1);
+    const auto* filename = sqlite3_column_text(stmt.Get(), 2);
+    row.title = title ? reinterpret_cast<const char*>(title) : "";
+    row.filename = filename ? reinterpret_cast<const char*>(filename) : "";
+    row.is_favorite = sqlite3_column_int(stmt.Get(), 3) != 0;
+    row.is_hidden = sqlite3_column_int(stmt.Get(), 4) != 0;
+    out.push_back(std::move(row));
+  }
+  return true;
+}
+
+bool Database::GetGameDetails(const int game_id, GameDetails& out) {
+  static const std::string kSql =
+      "SELECT g.id,g.system_id,s.name,g.title,g.filename,g.is_favorite,g.is_hidden,"
+      "COALESCE(m.release_year,0),COALESCE(m.genre,''),COALESCE(m.players,0),"
+      "COALESCE(m.description,''),COALESCE(m.source,''),COALESCE(a.box_art_path,'') "
+      "FROM games g JOIN systems s ON s.id=g.system_id "
+      "LEFT JOIN game_metadata m ON m.game_id=g.id "
+      "LEFT JOIN assets a ON a.game_id=g.id WHERE g.id=?1;";
+  Statement stmt(db_, kSql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare GetGameDetails");
+    return false;
+  }
+  sqlite3_bind_int(stmt.Get(), 1, game_id);
+  if (sqlite3_step(stmt.Get()) != SQLITE_ROW) {
+    SetError("game details not found: " + std::to_string(game_id));
+    return false;
+  }
+  const auto text = [&](const int column) {
+    const auto* value = sqlite3_column_text(stmt.Get(), column);
+    return value ? std::string(reinterpret_cast<const char*>(value)) : std::string{};
+  };
+  out = GameDetails{};
+  out.id = sqlite3_column_int(stmt.Get(), 0);
+  out.system_id = text(1);
+  out.system_name = text(2);
+  out.title = text(3);
+  out.filename = text(4);
+  out.is_favorite = sqlite3_column_int(stmt.Get(), 5) != 0;
+  out.is_hidden = sqlite3_column_int(stmt.Get(), 6) != 0;
+  out.release_year = sqlite3_column_int(stmt.Get(), 7);
+  out.genre = text(8);
+  out.players = sqlite3_column_int(stmt.Get(), 9);
+  out.description = text(10);
+  out.metadata_source = text(11);
+  out.box_art_path = text(12);
+  return true;
+}
+
+bool Database::ListPresentAssetCandidates(std::vector<AssetCandidate>& out) {
+  out.clear();
+  static const std::string kSql =
+      "SELECT id,system_id,title,filename,path FROM games "
+      "WHERE is_present=1 ORDER BY id;";
+  Statement stmt(db_, kSql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare ListPresentAssetCandidates");
+    return false;
+  }
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    const auto text = [&](const int column) {
+      const auto* value = sqlite3_column_text(stmt.Get(), column);
+      return value ? std::string(reinterpret_cast<const char*>(value)) : std::string{};
+    };
+    AssetCandidate row;
+    row.game_id = sqlite3_column_int(stmt.Get(), 0);
+    row.system_id = text(1);
+    row.title = text(2);
+    row.filename = text(3);
+    row.rom_path = text(4);
+    out.push_back(std::move(row));
+  }
+  return true;
+}
+
+bool Database::UpsertGameBoxArt(const int game_id, const std::string& box_art_path) {
+  static const std::string kSql =
+      "INSERT INTO assets(game_id,box_art_path,updated_at) VALUES(?1,?2,?3) "
+      "ON CONFLICT(game_id) DO UPDATE SET box_art_path=excluded.box_art_path,"
+      "updated_at=excluded.updated_at;";
+  Statement stmt(db_, kSql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare UpsertGameBoxArt");
+    return false;
+  }
+  sqlite3_bind_int(stmt.Get(), 1, game_id);
+  sqlite3_bind_text(stmt.Get(), 2, box_art_path.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt.Get(), 3, NowUnixSeconds());
+  if (sqlite3_step(stmt.Get()) != SQLITE_DONE) {
+    SetError("failed to execute UpsertGameBoxArt");
+    return false;
+  }
   return true;
 }
 
@@ -482,6 +807,38 @@ bool Database::GetLaunchInfo(const int game_id, LaunchInfo& out) {
   return true;
 }
 
+bool Database::ListPresentLaunchInfos(std::vector<LaunchInfo>& out) {
+  static const std::string kSql =
+      "SELECT g.id, g.system_id, g.title, g.path, s.launch_type, s.launch_template "
+      "FROM games g "
+      "JOIN systems s ON s.id = g.system_id "
+      "WHERE g.is_present=1 ORDER BY g.id;";
+
+  Statement stmt(db_, kSql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare ListPresentLaunchInfos");
+    return false;
+  }
+
+  out.clear();
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    const auto* sys_txt = sqlite3_column_text(stmt.Get(), 1);
+    const auto* title_txt = sqlite3_column_text(stmt.Get(), 2);
+    const auto* path_txt = sqlite3_column_text(stmt.Get(), 3);
+    const auto* type_txt = sqlite3_column_text(stmt.Get(), 4);
+    const auto* tmpl_txt = sqlite3_column_text(stmt.Get(), 5);
+    LaunchInfo row;
+    row.game_id = sqlite3_column_int(stmt.Get(), 0);
+    row.system_id = sys_txt ? reinterpret_cast<const char*>(sys_txt) : "";
+    row.title = title_txt ? reinterpret_cast<const char*>(title_txt) : "";
+    row.rom_path = path_txt ? reinterpret_cast<const char*>(path_txt) : "";
+    row.launch_type = type_txt ? reinterpret_cast<const char*>(type_txt) : "";
+    row.launch_template = tmpl_txt ? reinterpret_cast<const char*>(tmpl_txt) : "";
+    out.push_back(std::move(row));
+  }
+  return true;
+}
+
 bool Database::GetSystemLaunchInfo(const std::string& system_id, LaunchInfo& out) {
   static const std::string kSql =
       "SELECT id, launch_type, launch_template "
@@ -546,6 +903,33 @@ bool Database::GetLaunchOverride(const std::string& scope_type,
   out.audio_latency = sqlite3_column_int(stmt.Get(), 3);
   out.video_width = sqlite3_column_int(stmt.Get(), 4);
   out.video_height = sqlite3_column_int(stmt.Get(), 5);
+  return true;
+}
+
+bool Database::ListLaunchOverrides(std::vector<LaunchOverride>& out) {
+  static const std::string kSql =
+      "SELECT scope_type, scope_id, core_path, audio_latency, video_width, video_height "
+      "FROM launch_overrides ORDER BY scope_type, scope_id;";
+  Statement stmt(db_, kSql);
+  if (!stmt.Ok()) {
+    SetError("failed to prepare ListLaunchOverrides");
+    return false;
+  }
+
+  out.clear();
+  while (sqlite3_step(stmt.Get()) == SQLITE_ROW) {
+    const auto* type_txt = sqlite3_column_text(stmt.Get(), 0);
+    const auto* id_txt = sqlite3_column_text(stmt.Get(), 1);
+    const auto* core_txt = sqlite3_column_text(stmt.Get(), 2);
+    LaunchOverride row;
+    row.scope_type = type_txt ? reinterpret_cast<const char*>(type_txt) : "";
+    row.scope_id = id_txt ? reinterpret_cast<const char*>(id_txt) : "";
+    row.core_path = core_txt ? reinterpret_cast<const char*>(core_txt) : "";
+    row.audio_latency = sqlite3_column_int(stmt.Get(), 3);
+    row.video_width = sqlite3_column_int(stmt.Get(), 4);
+    row.video_height = sqlite3_column_int(stmt.Get(), 5);
+    out.push_back(std::move(row));
+  }
   return true;
 }
 

@@ -13,6 +13,7 @@
 
 #include <fcntl.h>
 #include <linux/input.h>
+#include <linux/joystick.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -204,6 +205,35 @@ std::vector<ProbeResult> ProbeAllEventDevices() {
   return probes;
 }
 
+std::filesystem::path CanonicalInputDevicePath(const std::string& input_name) {
+  std::error_code ec;
+  const auto path = std::filesystem::weakly_canonical(
+      std::filesystem::path("/sys/class/input") / input_name / "device", ec);
+  return ec ? std::filesystem::path() : path;
+}
+
+std::string FindJoystickForEvent(const std::string& event_path) {
+  const auto event_name = std::filesystem::path(event_path).filename().string();
+  const auto event_device = CanonicalInputDevicePath(event_name);
+  if (event_device.empty()) {
+    return {};
+  }
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator("/dev/input", ec)) {
+    if (ec) {
+      break;
+    }
+    const auto name = entry.path().filename().string();
+    if (name.rfind("js", 0) != 0) {
+      continue;
+    }
+    if (CanonicalInputDevicePath(name) == event_device) {
+      return entry.path().string();
+    }
+  }
+  return {};
+}
+
 std::string SelectPrimaryPath(const std::vector<ProbeResult>& probes) {
   const ProbeResult* best_gamepad = nullptr;
   const ProbeResult* best_keyboard = nullptr;
@@ -282,6 +312,7 @@ bool EvdevInput::OpenDevicePath(const std::string& path, const bool grab_input) 
   dev.is_bluetooth = probe.is_bluetooth;
   dev.is_gamepad = probe.is_gamepad;
   dev.is_keyboard = probe.is_keyboard;
+  PopulateJoystickMaps(dev);
 
   // Some low-cost USB pads expose D-pad as ABS_X/ABS_Y instead of HAT axes.
   const auto abs_bits = ReadEventBits(fd, EV_ABS, ABS_MAX);
@@ -333,65 +364,146 @@ bool EvdevInput::OpenDevicePath(const std::string& path, const bool grab_input) 
   core::Log(core::LogLevel::Info, msg);
 
   devices_.push_back(std::move(dev));
+  devices_changed_ = true;
   return true;
+}
+
+void EvdevInput::PopulateJoystickMaps(Device& dev) {
+  const std::string js_path = FindJoystickForEvent(dev.path);
+  if (js_path.empty()) {
+    return;
+  }
+  const std::string js_name = std::filesystem::path(js_path).filename().string();
+  if (js_name.rfind("js", 0) == 0) {
+    try {
+      dev.joypad_index = std::stoi(js_name.substr(2));
+    } catch (const std::exception&) {
+      dev.joypad_index = -1;
+    }
+  }
+  const int js_fd = open(js_path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (js_fd < 0) {
+    return;
+  }
+
+  std::array<unsigned short, KEY_MAX - BTN_MISC + 1> button_map {};
+  if (ioctl(js_fd, JSIOCGBTNMAP, button_map.data()) >= 0) {
+    for (std::size_t i = 0; i < button_map.size(); ++i) {
+      if (button_map[i] != 0) {
+        dev.js_button_index[button_map[i]] = static_cast<int>(i);
+      }
+    }
+  }
+  std::array<unsigned char, ABS_CNT> axis_map {};
+  if (ioctl(js_fd, JSIOCGAXMAP, axis_map.data()) >= 0) {
+    for (std::size_t i = 0; i < axis_map.size(); ++i) {
+      dev.js_axis_index[axis_map[i]] = static_cast<int>(i);
+    }
+  }
+  close(js_fd);
 }
 
 bool EvdevInput::Init(const std::string& device_path) {
   Shutdown();
-  device_path_ = device_path;
-
-  if (device_path == "auto") {
-    const auto probes = ProbeAllEventDevices();
-    const std::string primary = SelectPrimaryPath(probes);
-    if (primary.empty()) {
-      core::Log(core::LogLevel::Error, "No /dev/input/event* devices found for evdev input.");
-      return false;
-    }
-
-    std::set<std::string> selected;
-    selected.insert(primary);
-
-    const std::string keyboard_companion = SelectBestKeyboardPath(probes, primary);
-    if (!keyboard_companion.empty()) {
-      selected.insert(keyboard_companion);
-    }
-
-    bool opened_primary = false;
-    for (const auto& path : selected) {
-      const bool required = (path == primary);
-      if (!OpenDevicePath(path, true)) {
-        if (required) {
-          Shutdown();
-          return false;
-        }
-        core::Log(core::LogLevel::Warn, "Optional evdev companion skipped: " + path);
-        continue;
-      }
-      if (required) {
-        opened_primary = true;
-      }
-    }
-
-    if (!opened_primary || devices_.empty()) {
-      Shutdown();
-      return false;
-    }
-
-    device_path_.clear();
-    for (std::size_t i = 0; i < devices_.size(); ++i) {
-      if (i > 0) {
-        device_path_ += ",";
-      }
-      device_path_ += devices_[i].path;
-    }
-    return true;
-  }
-
-  if (!OpenDevicePath(device_path, true)) {
+  requested_path_ = device_path;
+  auto_mode_ = (device_path == "auto");
+  last_refresh_ms_ = 0;
+  if (!RefreshDevices(true) || devices_.empty()) {
+    core::Log(core::LogLevel::Error,
+              auto_mode_ ? "No suitable /dev/input/event* devices found."
+                         : "evdev input unavailable: " + device_path);
     return false;
   }
-  device_path_ = device_path;
   return true;
+}
+
+void EvdevInput::RebuildDevicePath() {
+  device_path_.clear();
+  for (std::size_t i = 0; i < devices_.size(); ++i) {
+    if (i > 0) {
+      device_path_ += ",";
+    }
+    device_path_ += devices_[i].path;
+  }
+}
+
+void EvdevInput::RemoveDevices(const std::vector<std::string>& paths) {
+  if (paths.empty()) {
+    return;
+  }
+  const std::set<std::string> remove(paths.begin(), paths.end());
+  devices_.erase(
+      std::remove_if(devices_.begin(), devices_.end(), [&](Device& dev) {
+        if (!remove.count(dev.path)) {
+          return false;
+        }
+        if (dev.fd >= 0) {
+          if (dev.grabbed) {
+            ioctl(dev.fd, EVIOCGRAB, 0);
+          }
+          close(dev.fd);
+          dev.fd = -1;
+        }
+        core::Log(core::LogLevel::Warn, "evdev disconnected " + dev.path);
+        return true;
+      }),
+      devices_.end());
+  devices_changed_ = true;
+  RebuildDevicePath();
+}
+
+bool EvdevInput::RefreshDevices(const bool force) {
+  const auto now = core::NowMs();
+  if (!force && last_refresh_ms_ != 0 && now - last_refresh_ms_ < 1000) {
+    return !devices_.empty();
+  }
+  last_refresh_ms_ = now;
+
+  std::set<std::string> desired;
+  if (auto_mode_) {
+    const auto probes = ProbeAllEventDevices();
+    const std::string primary = SelectPrimaryPath(probes);
+    for (const auto& probe : probes) {
+      if (probe.is_gamepad) {
+        desired.insert(probe.path);
+      }
+    }
+    if (desired.empty() && !primary.empty()) {
+      desired.insert(primary);
+    }
+    const std::string keyboard = SelectBestKeyboardPath(probes, {});
+    if (!keyboard.empty()) {
+      desired.insert(keyboard);
+    }
+  } else if (!requested_path_.empty() && std::filesystem::exists(requested_path_)) {
+    desired.insert(requested_path_);
+  }
+
+  std::vector<std::string> removed;
+  for (const auto& dev : devices_) {
+    if (!desired.count(dev.path) || !std::filesystem::exists(dev.path)) {
+      removed.push_back(dev.path);
+    }
+  }
+  RemoveDevices(removed);
+
+  std::set<std::string> open_paths;
+  for (const auto& dev : devices_) {
+    open_paths.insert(dev.path);
+  }
+  for (const auto& path : desired) {
+    if (!open_paths.count(path)) {
+      OpenDevicePath(path, true);
+    }
+  }
+  RebuildDevicePath();
+  return !devices_.empty();
+}
+
+bool EvdevInput::ConsumeDevicesChanged() {
+  const bool changed = devices_changed_;
+  devices_changed_ = false;
+  return changed;
 }
 
 bool EvdevInput::MapKeyCode(const unsigned short code,
@@ -495,12 +607,143 @@ bool EvdevInput::MapKeyCode(const unsigned short code,
   }
 }
 
+std::string EvdevInput::RetroArchKeyName(const unsigned short code) {
+  if (code >= KEY_1 && code <= KEY_9) {
+    return std::string(1, static_cast<char>('1' + (code - KEY_1)));
+  }
+  if (code == KEY_0) {
+    return "0";
+  }
+  switch (code) {
+    case KEY_A:
+      return "a";
+    case KEY_B:
+      return "b";
+    case KEY_C:
+      return "c";
+    case KEY_D:
+      return "d";
+    case KEY_E:
+      return "e";
+    case KEY_F:
+      return "f";
+    case KEY_G:
+      return "g";
+    case KEY_H:
+      return "h";
+    case KEY_I:
+      return "i";
+    case KEY_J:
+      return "j";
+    case KEY_K:
+      return "k";
+    case KEY_L:
+      return "l";
+    case KEY_M:
+      return "m";
+    case KEY_N:
+      return "n";
+    case KEY_O:
+      return "o";
+    case KEY_P:
+      return "p";
+    case KEY_Q:
+      return "q";
+    case KEY_R:
+      return "r";
+    case KEY_S:
+      return "s";
+    case KEY_T:
+      return "t";
+    case KEY_U:
+      return "u";
+    case KEY_V:
+      return "v";
+    case KEY_W:
+      return "w";
+    case KEY_X:
+      return "x";
+    case KEY_Y:
+      return "y";
+    case KEY_Z:
+      return "z";
+    case KEY_UP:
+      return "up";
+    case KEY_DOWN:
+      return "down";
+    case KEY_LEFT:
+      return "left";
+    case KEY_RIGHT:
+      return "right";
+    case KEY_ENTER:
+      return "enter";
+    case KEY_SPACE:
+      return "space";
+    case KEY_TAB:
+      return "tab";
+    case KEY_BACKSPACE:
+      return "backspace";
+    case KEY_ESC:
+      return "escape";
+    case KEY_LEFTSHIFT:
+      return "lshift";
+    case KEY_RIGHTSHIFT:
+      return "rshift";
+    case KEY_LEFTCTRL:
+      return "lctrl";
+    case KEY_RIGHTCTRL:
+      return "rctrl";
+    case KEY_LEFTALT:
+      return "lalt";
+    case KEY_RIGHTALT:
+      return "ralt";
+    default:
+      return {};
+  }
+}
+
+std::string EvdevInput::RetroArchBindingForEvent(const Device& dev,
+                                                 const input_event& event) const {
+  if (event.type == EV_KEY) {
+    if (dev.is_keyboard) {
+      const std::string key = RetroArchKeyName(event.code);
+      return key.empty() ? std::string() : "key:" + key;
+    }
+    const auto it = dev.js_button_index.find(event.code);
+    if (it != dev.js_button_index.end()) {
+      return "btn:" + std::to_string(it->second);
+    }
+    return {};
+  }
+  if (event.type != EV_ABS || event.value == 0) {
+    return {};
+  }
+  if (event.code == ABS_HAT0X) {
+    return event.value < 0 ? "btn:h0left" : "btn:h0right";
+  }
+  if (event.code == ABS_HAT0Y) {
+    return event.value < 0 ? "btn:h0up" : "btn:h0down";
+  }
+  const auto it = dev.js_axis_index.find(event.code);
+  if (it == dev.js_axis_index.end()) {
+    return {};
+  }
+  return std::string("axis:") + (event.value < 0 ? "-" : "+") +
+         std::to_string(it->second);
+}
+
 bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
   out.pressed.clear();
   out.events.clear();
   out.quit_requested = false;
+  out.devices_changed = false;
 
+  RefreshDevices(false);
   if (devices_.empty()) {
+    if (timeout_ms > 0) {
+      poll(nullptr, 0, timeout_ms);
+    }
+    RefreshDevices(false);
     return false;
   }
 
@@ -517,6 +760,7 @@ bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
   }
 
   bool has_input = false;
+  std::vector<std::string> disconnected;
   for (std::size_t i = 0; i < devices_.size(); ++i) {
     const auto revents = pfds[i].revents;
     if (revents == 0) {
@@ -524,10 +768,8 @@ bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
     }
 
     if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
-      core::Log(core::LogLevel::Error,
-                "evdev poll error/hangup on " + devices_[i].path);
-      out.quit_requested = true;
-      return true;
+      disconnected.push_back(devices_[i].path);
+      continue;
     }
 
     while (true) {
@@ -556,6 +798,8 @@ bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
               .raw_code = raw_ev.code,
               .raw_value = raw_ev.value,
               .hold_ms = hold_ms,
+              .retroarch_joypad_index = devices_[i].joypad_index,
+              .retroarch_binding = RetroArchBindingForEvent(devices_[i], raw_ev),
           });
           has_input = true;
         };
@@ -655,16 +899,21 @@ bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
       }
 
       if (n < 0) {
-        core::Log(core::LogLevel::Error,
+        core::Log(core::LogLevel::Warn,
                   "evdev read failed on " + devices_[i].path + ": " +
                       std::string(std::strerror(errno)));
-        out.quit_requested = true;
-        return true;
+        disconnected.push_back(devices_[i].path);
+        break;
       }
 
+      if (n == 0) {
+        disconnected.push_back(devices_[i].path);
+      }
       break;
     }
   }
+
+  RemoveDevices(disconnected);
 
   return has_input;
 }
@@ -682,6 +931,7 @@ void EvdevInput::Shutdown() {
     dev.fd = -1;
   }
   devices_.clear();
+  device_path_.clear();
 }
 
 void EvdevInput::ReleaseDeviceGrabs() {
@@ -700,6 +950,7 @@ void EvdevInput::ReleaseDeviceGrabs() {
 }
 
 void EvdevInput::AcquireDeviceGrabs() {
+  RefreshDevices(true);
   for (auto& dev : devices_) {
     if (dev.fd < 0 || dev.grabbed) {
       continue;
@@ -732,6 +983,7 @@ std::vector<EvdevDeviceInfo> EvdevInput::ConnectedDevices() const {
         .is_bluetooth = dev.is_bluetooth,
         .is_gamepad = dev.is_gamepad,
         .is_keyboard = dev.is_keyboard,
+        .joypad_index = dev.joypad_index,
     });
   }
   return out;

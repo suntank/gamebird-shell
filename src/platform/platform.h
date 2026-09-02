@@ -35,10 +35,15 @@ struct InputEvent {
   std::uint16_t raw_code = 0;
   int raw_value = 0;
   int hold_ms = 0;
+  int retroarch_joypad_index = -1;
+  // Encoded as "key:<name>", "btn:<index-or-hat>", or "axis:<signed-index>".
+  // Empty when the raw device event cannot be represented by RetroArch.
+  std::string retroarch_binding;
 };
 
 struct InputFrame {
   bool quit_requested = false;
+  bool devices_changed = false;
   std::vector<Button> pressed;
   std::vector<InputEvent> events;
 };

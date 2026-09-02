@@ -11,6 +11,7 @@ struct WorkerConfig {
   std::string defaults_json_path;
   std::string systems_dir;
   std::vector<std::string> override_roots;
+  std::string artwork_dir = "./data/artwork";
   bool hide_missing = false;
   int metadata_batch = 256;
 };
@@ -20,7 +21,12 @@ struct WorkerStats {
   int jobs_ok = 0;
   int jobs_error = 0;
   int scan_files_seen = 0;
+  int scan_roots_ok = 0;
+  int scan_roots_unavailable = 0;
+  int scan_roots_error = 0;
   int metadata_updates = 0;
+  int artwork_indexed = 0;
+  int artwork_missing = 0;
 };
 
 void EnqueueDefaultJobs(db::Database& db,

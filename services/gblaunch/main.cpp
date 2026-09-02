@@ -1,13 +1,13 @@
 #include <chrono>
-#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
+#include "core/launch_config.h"
 #include "core/logging.h"
 #include "db/db.h"
 #include "platform/proc.h"
@@ -18,6 +18,8 @@ struct Args {
   std::string db_path = "./data/catalog.db";
   int game_id = 0;
   bool dry_run = false;
+  bool show_effective = false;
+  bool validate_all = false;
 };
 
 Args ParseArgs(const int argc, char** argv) {
@@ -38,204 +40,17 @@ Args ParseArgs(const int argc, char** argv) {
       out.dry_run = true;
       continue;
     }
+    if (arg == "--show-effective") {
+      out.show_effective = true;
+      continue;
+    }
+    if (arg == "--validate-all") {
+      out.validate_all = true;
+      continue;
+    }
   }
 
   return out;
-}
-
-std::string ReplaceAll(std::string input,
-                       const std::string& from,
-                       const std::string& to) {
-  if (from.empty()) {
-    return input;
-  }
-
-  size_t pos = 0;
-  while ((pos = input.find(from, pos)) != std::string::npos) {
-    input.replace(pos, from.size(), to);
-    pos += to.size();
-  }
-  return input;
-}
-
-bool TokenizeCommand(const std::string& command,
-                     std::vector<std::string>& out,
-                     std::string& error) {
-  out.clear();
-  std::string cur;
-
-  enum class Quote { None, Single, Double };
-  Quote quote = Quote::None;
-  bool escape = false;
-
-  for (char c : command) {
-    if (escape) {
-      cur.push_back(c);
-      escape = false;
-      continue;
-    }
-
-    if (quote == Quote::Single) {
-      if (c == '\'') {
-        quote = Quote::None;
-      } else {
-        cur.push_back(c);
-      }
-      continue;
-    }
-
-    if (quote == Quote::Double) {
-      if (c == '"') {
-        quote = Quote::None;
-      } else if (c == '\\') {
-        escape = true;
-      } else {
-        cur.push_back(c);
-      }
-      continue;
-    }
-
-    if (c == '\\') {
-      escape = true;
-      continue;
-    }
-    if (c == '\'') {
-      quote = Quote::Single;
-      continue;
-    }
-    if (c == '"') {
-      quote = Quote::Double;
-      continue;
-    }
-
-    if (std::isspace(static_cast<unsigned char>(c)) != 0) {
-      if (!cur.empty()) {
-        out.push_back(cur);
-        cur.clear();
-      }
-      continue;
-    }
-
-    cur.push_back(c);
-  }
-
-  if (escape) {
-    error = "trailing escape in launch template";
-    return false;
-  }
-  if (quote != Quote::None) {
-    error = "unclosed quote in launch template";
-    return false;
-  }
-  if (!cur.empty()) {
-    out.push_back(cur);
-  }
-  if (out.empty()) {
-    error = "launch template produced empty argv";
-    return false;
-  }
-
-  return true;
-}
-
-bool BuildLaunchArgv(const gb::db::LaunchInfo& info,
-                     std::vector<std::string>& out,
-                     std::string& error) {
-  std::string templ = info.launch_template;
-  if (templ.empty()) {
-    templ = "{rom_path}";
-  }
-
-  if (!TokenizeCommand(templ, out, error)) {
-    return false;
-  }
-
-  const std::unordered_map<std::string, std::string> vars = {
-      {"{rom_path}", info.rom_path},
-      {"{system_id}", info.system_id},
-      {"{title}", info.title},
-      {"{game_id}", std::to_string(info.game_id)},
-  };
-
-  for (auto& token : out) {
-    for (const auto& [key, value] : vars) {
-      token = ReplaceAll(token, key, value);
-    }
-  }
-
-  if (out.front().empty()) {
-    error = "empty executable path in launch argv";
-    return false;
-  }
-
-  return true;
-}
-
-bool TryGetLaunchOverride(gb::db::Database& db,
-                          const std::string& scope_type,
-                          const std::string& scope_id,
-                          gb::db::LaunchOverride& out,
-                          bool& found,
-                          std::string& error) {
-  auto is_not_found = [](const std::string& err) {
-    return err.rfind("launch override not found", 0) == 0;
-  };
-  if (db.GetLaunchOverride(scope_type, scope_id, out)) {
-    found = true;
-    return true;
-  }
-  found = false;
-  if (is_not_found(db.LastError())) {
-    out = gb::db::LaunchOverride{};
-    return true;
-  }
-  error = db.LastError();
-  return false;
-}
-
-void MergeLaunchOverride(const gb::db::LaunchOverride& src,
-                         gb::db::LaunchOverride& dst) {
-  if (!src.core_path.empty()) {
-    dst.core_path = src.core_path;
-  }
-  if (src.audio_latency > 0) {
-    dst.audio_latency = src.audio_latency;
-  }
-  if (src.video_width > 0 && src.video_height > 0) {
-    dst.video_width = src.video_width;
-    dst.video_height = src.video_height;
-  }
-}
-
-bool ApplyCoreOverride(std::vector<std::string>& argv, const std::string& core_path) {
-  if (core_path.empty() || argv.empty()) {
-    return false;
-  }
-
-  for (std::size_t i = 0; i < argv.size(); ++i) {
-    if ((argv[i] == "-L" || argv[i] == "--libretro") && (i + 1) < argv.size()) {
-      argv[i + 1] = core_path;
-      return true;
-    }
-    if (argv[i].rfind("-L", 0) == 0 && argv[i].size() > 2) {
-      argv[i] = "-L" + core_path;
-      return true;
-    }
-    constexpr std::string_view kLibretroPrefix = "--libretro=";
-    if (argv[i].rfind(kLibretroPrefix, 0) == 0) {
-      argv[i] = std::string(kLibretroPrefix) + core_path;
-      return true;
-    }
-  }
-
-  if (argv.size() == 1) {
-    argv.push_back("-L");
-    argv.push_back(core_path);
-  } else {
-    argv.insert(argv.begin() + 1, core_path);
-    argv.insert(argv.begin() + 1, "-L");
-  }
-  return true;
 }
 
 bool BuildOverrideAppendConfig(const gb::db::LaunchOverride& merged_override,
@@ -287,14 +102,146 @@ std::int64_t NowUnixSeconds() {
       std::chrono::duration_cast<std::chrono::seconds>(now).count());
 }
 
+std::string BaseName(const std::string& path) {
+  return path.empty() ? std::string() : std::filesystem::path(path).filename().string();
+}
+
+std::string JoinConfigNames(const gb::core::EffectiveLaunch& launch) {
+  if (launch.append_configs.empty()) {
+    return "none";
+  }
+  std::string out;
+  for (const auto& config : launch.append_configs) {
+    if (!out.empty()) {
+      out += ",";
+    }
+    out += BaseName(config);
+  }
+  return out;
+}
+
+void LogEffectiveLaunch(const gb::core::EffectiveLaunch& launch) {
+  gb::core::Log(gb::core::LogLevel::Info,
+                "effective game_id=" + std::to_string(launch.info.game_id) +
+                    " system=" + launch.info.system_id +
+                    " core=" +
+                    (launch.effective_core.empty() ? "none" : launch.effective_core) +
+                    " core_source=\"" + launch.core_source + "\"" +
+                    " append_config=" + JoinConfigNames(launch));
+}
+
+bool LogLaunchIssues(const gb::core::EffectiveLaunch& launch) {
+  bool has_error = false;
+  for (const auto& issue : gb::core::ValidateEffectiveLaunch(launch)) {
+    const bool is_error = issue.severity == gb::core::LaunchIssueSeverity::Error;
+    has_error |= is_error;
+    gb::core::Log(is_error ? gb::core::LogLevel::Error : gb::core::LogLevel::Warn,
+                  "game_id=" + std::to_string(launch.info.game_id) + " " +
+                      issue.message);
+  }
+  return !has_error;
+}
+
+int ValidateAllLaunches(gb::db::Database& db) {
+  std::vector<gb::db::LaunchInfo> games;
+  if (!db.ListPresentLaunchInfos(games)) {
+    gb::core::Log(gb::core::LogLevel::Error,
+                  "validation query failed: " + db.LastError());
+    return 1;
+  }
+
+  std::set<std::string> system_ids;
+  std::set<std::string> game_paths;
+  std::vector<gb::db::SystemSummary> systems;
+  if (!db.ListSystems(systems)) {
+    gb::core::Log(gb::core::LogLevel::Error,
+                  "system query failed: " + db.LastError());
+    return 1;
+  }
+  for (const auto& system : systems) {
+    system_ids.insert(system.id);
+  }
+  for (const auto& game : games) {
+    game_paths.insert(game.rom_path);
+  }
+
+  int error_count = 0;
+  int warning_count = 0;
+  for (const auto& game : games) {
+    gb::core::EffectiveLaunch launch;
+    std::string error;
+    if (!gb::core::ResolveEffectiveLaunch(db, game, launch, error)) {
+      ++error_count;
+      gb::core::Log(gb::core::LogLevel::Error,
+                    "game_id=" + std::to_string(game.game_id) + " " + error);
+      continue;
+    }
+
+    const auto issues = gb::core::ValidateEffectiveLaunch(launch);
+    bool has_error = false;
+    for (const auto& issue : issues) {
+      const bool is_error = issue.severity == gb::core::LaunchIssueSeverity::Error;
+      has_error |= is_error;
+      if (is_error) {
+        ++error_count;
+      } else {
+        ++warning_count;
+      }
+      gb::core::Log(is_error ? gb::core::LogLevel::Error : gb::core::LogLevel::Warn,
+                    "game_id=" + std::to_string(game.game_id) + " " + issue.message);
+    }
+    if (!has_error) {
+      gb::core::Log(gb::core::LogLevel::Info,
+                    "OK game_id=" + std::to_string(game.game_id) +
+                        " system=" + game.system_id + " core=" +
+                        (launch.effective_core.empty() ? "none"
+                                                       : BaseName(launch.effective_core)) +
+                        " config=" + JoinConfigNames(launch));
+    }
+  }
+
+  std::vector<gb::db::LaunchOverride> overrides;
+  if (!db.ListLaunchOverrides(overrides)) {
+    gb::core::Log(gb::core::LogLevel::Error,
+                  "override query failed: " + db.LastError());
+    return 1;
+  }
+  for (const auto& row : overrides) {
+    bool orphaned = false;
+    if (row.scope_type == "system") {
+      orphaned = !system_ids.count(row.scope_id);
+    } else if (row.scope_type == "game") {
+      orphaned = !game_paths.count(row.scope_id);
+    } else {
+      ++error_count;
+      gb::core::Log(gb::core::LogLevel::Error,
+                    "invalid override scope: " + row.scope_type + ":" + row.scope_id);
+      continue;
+    }
+    if (orphaned) {
+      ++warning_count;
+      gb::core::Log(gb::core::LogLevel::Warn,
+                    "orphaned override: " + row.scope_type + ":" + row.scope_id);
+    }
+  }
+
+  gb::core::Log(error_count == 0 ? gb::core::LogLevel::Info
+                                 : gb::core::LogLevel::Error,
+                "validation summary games=" + std::to_string(games.size()) +
+                    " errors=" + std::to_string(error_count) +
+                    " warnings=" + std::to_string(warning_count));
+  return error_count == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   const Args args = ParseArgs(argc, argv);
 
-  if (args.game_id <= 0) {
+  if (args.game_id <= 0 && !args.validate_all) {
     gb::core::Log(gb::core::LogLevel::Error,
-                  "usage: gblaunch --db <path> --game-id <id> [--dry-run]");
+                  "usage: gblaunch --db <path> (--game-id <id> [--dry-run] "
+                  "[--show-effective] | --validate-all)");
     return 2;
   }
 
@@ -305,56 +252,29 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  gb::db::LaunchInfo info;
-  if (!db.GetLaunchInfo(args.game_id, info)) {
-    gb::core::Log(gb::core::LogLevel::Error,
-                  "launch lookup failed: " + db.LastError());
-    return 1;
+  if (args.validate_all) {
+    return ValidateAllLaunches(db);
   }
 
-  std::vector<std::string> cmd_argv;
+  gb::core::EffectiveLaunch effective;
   std::string build_error;
-  if (!BuildLaunchArgv(info, cmd_argv, build_error)) {
+  if (!gb::core::ResolveEffectiveLaunch(db, args.game_id, effective, build_error)) {
     gb::core::Log(gb::core::LogLevel::Error,
-                  "launch argv build failed: " + build_error);
+                  "launch resolution failed: " + build_error);
     return 1;
   }
-
-  gb::db::LaunchOverride merged_override;
-  if (info.launch_type == "retroarch") {
-    gb::db::LaunchOverride system_override;
-    gb::db::LaunchOverride game_override;
-    bool has_system_override = false;
-    bool has_game_override = false;
-    std::string override_error;
-
-    if (!TryGetLaunchOverride(db, "system", info.system_id, system_override,
-                              has_system_override, override_error)) {
-      gb::core::Log(gb::core::LogLevel::Error,
-                    "system override read failed: " + override_error);
-      return 1;
-    }
-    if (!TryGetLaunchOverride(db, "game", info.rom_path, game_override,
-                              has_game_override, override_error)) {
-      gb::core::Log(gb::core::LogLevel::Error,
-                    "game override read failed: " + override_error);
-      return 1;
-    }
-
-    if (has_system_override) {
-      MergeLaunchOverride(system_override, merged_override);
-    }
-    if (has_game_override) {
-      MergeLaunchOverride(game_override, merged_override);
-    }
-
-    ApplyCoreOverride(cmd_argv, merged_override.core_path);
+  std::vector<std::string> cmd_argv = effective.argv;
+  if (!LogLaunchIssues(effective)) {
+    gb::core::Log(gb::core::LogLevel::Error,
+                  "launch blocked by invalid effective configuration");
+    return 1;
   }
+  LogEffectiveLaunch(effective);
 
   std::string override_append_cfg_path;
-  if (info.launch_type == "retroarch") {
+  if (effective.info.launch_type == "retroarch") {
     std::string append_error;
-    if (!BuildOverrideAppendConfig(merged_override, info.game_id,
+    if (!BuildOverrideAppendConfig(effective.merged_override, effective.info.game_id,
                                    override_append_cfg_path, append_error) &&
         !append_error.empty()) {
       gb::core::Log(gb::core::LogLevel::Error,
@@ -389,8 +309,8 @@ int main(int argc, char** argv) {
   }
 
   gb::core::Log(gb::core::LogLevel::Info,
-                "launching game_id=" + std::to_string(info.game_id) +
-                    " title=\"" + info.title + "\"");
+                "launching game_id=" + std::to_string(effective.info.game_id) +
+                    " title=\"" + effective.info.title + "\"");
 
   const auto result = gb::platform::RunProcessBlocking(cmd_argv);
   if (!result.launched) {
@@ -400,7 +320,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (!db.UpdateLastPlayed(info.game_id, NowUnixSeconds())) {
+  if (!db.UpdateLastPlayed(effective.info.game_id, NowUnixSeconds())) {
     gb::core::Log(gb::core::LogLevel::Warn,
                   "failed to update last_played: " + db.LastError());
   }

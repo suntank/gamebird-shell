@@ -1,5 +1,7 @@
 #include "scrape/jobs.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -33,8 +35,14 @@ bool RunScanJob(db::Database& db,
   }
 
   stats.scan_files_seen += scan_stats.files_seen;
+  stats.scan_roots_ok += scan_stats.roots_ok;
+  stats.scan_roots_unavailable += scan_stats.roots_unavailable;
+  stats.scan_roots_error += scan_stats.roots_error;
   info = "scan ok files_seen=" + std::to_string(scan_stats.files_seen) +
-         " upserted=" + std::to_string(scan_stats.games_upserted);
+         " upserted=" + std::to_string(scan_stats.games_upserted) +
+         " roots_ok=" + std::to_string(scan_stats.roots_ok) +
+         " roots_unavailable=" + std::to_string(scan_stats.roots_unavailable) +
+         " roots_error=" + std::to_string(scan_stats.roots_error);
   return true;
 }
 
@@ -62,6 +70,65 @@ bool RunIdentifyJob(db::Database& db,
 
   stats.metadata_updates += updated;
   info = "identify ok updated=" + std::to_string(updated);
+  return true;
+}
+
+std::vector<std::filesystem::path> ArtworkPathsFor(
+    const db::AssetCandidate& game,
+    const std::filesystem::path& artwork_dir) {
+  const std::filesystem::path rom_path(game.rom_path);
+  const std::string stem = rom_path.stem().string();
+  std::vector<std::filesystem::path> paths;
+  const auto add = [&](const std::filesystem::path& path) {
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+      paths.push_back(path);
+    }
+  };
+  add(artwork_dir / game.system_id / (stem + ".png"));
+  add(artwork_dir / game.system_id / (game.title + ".png"));
+  add(rom_path.parent_path() / (stem + ".png"));
+  return paths;
+}
+
+bool RunArtworkIndexJob(db::Database& db,
+                        const WorkerConfig& cfg,
+                        WorkerStats& stats,
+                        std::string& info,
+                        std::string& error) {
+  std::vector<db::AssetCandidate> games;
+  if (!db.ListPresentAssetCandidates(games)) {
+    error = db.LastError();
+    return false;
+  }
+
+  const std::filesystem::path artwork_dir = cfg.artwork_dir.empty()
+                                                ? std::filesystem::path("./data/artwork")
+                                                : std::filesystem::path(cfg.artwork_dir);
+  int indexed = 0;
+  int missing = 0;
+  for (const auto& game : games) {
+    std::filesystem::path found;
+    for (const auto& candidate : ArtworkPathsFor(game, artwork_dir)) {
+      std::error_code ec;
+      if (std::filesystem::is_regular_file(candidate, ec) && !ec) {
+        found = candidate;
+        break;
+      }
+    }
+    if (found.empty()) {
+      ++missing;
+      continue;
+    }
+    if (!db.UpsertGameBoxArt(game.game_id, found.string())) {
+      error = db.LastError();
+      return false;
+    }
+    ++indexed;
+  }
+  stats.artwork_indexed += indexed;
+  stats.artwork_missing += missing;
+  info = "artwork index ok indexed=" + std::to_string(indexed) +
+         " missing=" + std::to_string(missing);
   return true;
 }
 
@@ -108,8 +175,9 @@ bool ProcessOneQueuedJob(db::Database& db,
     ok = RunScanJob(db, cfg, stats, step_info, step_error);
   } else if (job.type == "identify") {
     ok = RunIdentifyJob(db, cfg, stats, step_info, step_error);
-  } else if (job.type == "scrape" || job.type == "download_art" ||
-             job.type == "build_thumb") {
+  } else if (job.type == "build_thumb") {
+    ok = RunArtworkIndexJob(db, cfg, stats, step_info, step_error);
+  } else if (job.type == "scrape" || job.type == "download_art") {
     ok = RunPlaceholderJob(job.type, step_info);
   } else {
     step_error = "unknown job type: " + job.type;

@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +16,7 @@ struct Args {
   std::string db_path = "./data/catalog.db";
   std::string defaults_json = "./config/defaults.json";
   std::string systems_dir = "./config/systems.d";
+  std::string artwork_dir;
   std::vector<std::string> roots;
   bool hide_missing = false;
 
@@ -27,6 +29,7 @@ struct Args {
   bool enqueue_scan = false;
   bool enqueue_identify = false;
   bool enqueue_scrape = false;
+  bool enqueue_artwork = false;
 };
 
 Args ParseArgs(const int argc, char** argv) {
@@ -45,6 +48,10 @@ Args ParseArgs(const int argc, char** argv) {
     }
     if (arg == "--systems-dir" && i + 1 < argc) {
       out.systems_dir = argv[++i];
+      continue;
+    }
+    if (arg == "--artwork-dir" && i + 1 < argc) {
+      out.artwork_dir = argv[++i];
       continue;
     }
     if (arg == "--root" && i + 1 < argc) {
@@ -96,6 +103,10 @@ Args ParseArgs(const int argc, char** argv) {
       out.enqueue_scrape = true;
       continue;
     }
+    if (arg == "--enqueue-artwork") {
+      out.enqueue_artwork = true;
+      continue;
+    }
   }
 
   return out;
@@ -123,6 +134,10 @@ int RunScanOnce(gb::db::Database& db, const Args& args) {
 
   gb::core::Log(gb::core::LogLevel::Info,
                 "scan complete systems=" + std::to_string(stats.systems_loaded) +
+                    " roots_ok=" + std::to_string(stats.roots_ok) +
+                    " roots_unavailable=" +
+                    std::to_string(stats.roots_unavailable) +
+                    " roots_error=" + std::to_string(stats.roots_error) +
                     " files_seen=" + std::to_string(stats.files_seen) +
                     " upserted=" + std::to_string(stats.games_upserted) +
                     " total=" + std::to_string(stats.total_games) +
@@ -150,6 +165,9 @@ void EnqueueRequestedJobs(gb::db::Database& db, const Args& args) {
   }
 
   gb::scrape::EnqueueDefaultJobs(db, do_scan, do_identify, do_scrape);
+  if (args.enqueue_artwork) {
+    db.EnqueueJob("build_thumb", "{}");
+  }
 }
 
 }  // namespace
@@ -178,13 +196,16 @@ int main(int argc, char** argv) {
   }
 
   if (args.enqueue_default || args.enqueue_scan || args.enqueue_identify ||
-      args.enqueue_scrape) {
+      args.enqueue_scrape || args.enqueue_artwork) {
     EnqueueRequestedJobs(db, args);
   }
 
   gb::scrape::WorkerConfig worker_cfg;
   worker_cfg.defaults_json_path = args.defaults_json;
   worker_cfg.systems_dir = args.systems_dir;
+  worker_cfg.artwork_dir = args.artwork_dir.empty()
+                               ? (std::filesystem::path(args.db_path).parent_path() / "artwork").string()
+                               : args.artwork_dir;
   worker_cfg.override_roots = args.roots;
   worker_cfg.hide_missing = args.hide_missing;
 
@@ -192,7 +213,8 @@ int main(int argc, char** argv) {
 
   if (args.mode_jobs_once) {
     if (!args.enqueue_default && !args.enqueue_scan && !args.enqueue_identify &&
-        !args.enqueue_scrape && db.CountJobsByStatus("queued") == 0) {
+        !args.enqueue_scrape && !args.enqueue_artwork &&
+        db.CountJobsByStatus("queued") == 0) {
       gb::scrape::EnqueueDefaultJobs(db, true, true, false);
     }
 
@@ -204,7 +226,11 @@ int main(int argc, char** argv) {
                       " ok=" + std::to_string(worker_stats.jobs_ok) +
                       " err=" + std::to_string(worker_stats.jobs_error) +
                       " metadata_updates=" +
-                      std::to_string(worker_stats.metadata_updates));
+                      std::to_string(worker_stats.metadata_updates) +
+                      " artwork_indexed=" +
+                      std::to_string(worker_stats.artwork_indexed) +
+                      " artwork_missing=" +
+                      std::to_string(worker_stats.artwork_missing));
     return worker_stats.jobs_error > 0 ? 3 : 0;
   }
 

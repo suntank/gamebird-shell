@@ -1,23 +1,61 @@
 #include "ui/screens/home.h"
 
+#include "render/image_cache.h"
 #include "ui/widgets/text.h"
 
 namespace gb::ui::screens {
 
-void DrawDetails(render::Surface240& surface, const render::Theme& theme) {
+void DrawDetails(render::Surface240& surface,
+                 const render::Theme& theme,
+                 const std::string& title,
+                 const std::string& system,
+                 const std::string& filename,
+                 const int release_year,
+                 const std::string& genre,
+                 const int players,
+                 const std::string& metadata_source,
+                 const std::string& box_art_path,
+                 const bool is_favorite,
+                 const bool is_hidden,
+                 const std::string& status) {
   surface.Clear(theme.bg);
   surface.FillRect(8, 8, 224, 224, theme.panel);
   surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
 
-  surface.FillRect(16, 28, 64, 64, theme.panel_border);
   widgets::DrawText(surface, 16, 18, "DETAILS", theme.accent, 1);
-  widgets::DrawText(surface, 92, 34, "YEAR: 1994", theme.text, 1);
-  widgets::DrawText(surface, 92, 50, "GENRE: ACTION", theme.text, 1);
-  widgets::DrawText(surface, 92, 66, "PLAYERS: 1", theme.text, 1);
-  widgets::DrawText(surface, 16, 108, "LAUNCH", theme.success, 1);
-  widgets::DrawText(surface, 16, 124, "FAVORITE", theme.text, 1);
-  widgets::DrawText(surface, 16, 140, "HIDE", theme.text, 1);
-  widgets::DrawText(surface, 16, 210, "B:BACK", theme.text_dim, 1);
+  widgets::DrawText(surface, 16, 34, title, theme.text, 1);
+  widgets::DrawText(surface, 16, 48, system, theme.text_dim, 1);
+
+  static render::ImageCache image_cache;
+  std::string artwork_error;
+  const auto* artwork = image_cache.LoadPng(box_art_path, artwork_error);
+  if (artwork != nullptr) {
+    render::BlitImageFit(surface, *artwork, render::Rect{16, 62, 60, 60},
+                         theme.panel_border);
+  } else {
+    surface.FillRect(16, 62, 60, 60, theme.panel_border);
+    widgets::DrawText(surface, 24, 86, "NO ART", theme.text_dim, 1);
+  }
+  widgets::DrawText(surface, 88, 66,
+                    "YEAR: " + (release_year > 0 ? std::to_string(release_year) : "-") ,
+                    theme.text, 1);
+  widgets::DrawText(surface, 88, 82,
+                    "GENRE: " + (genre.empty() ? "-" : genre), theme.text, 1);
+  widgets::DrawText(surface, 88, 98,
+                    "PLAYERS: " + (players > 0 ? std::to_string(players) : "-"),
+                    theme.text, 1);
+  widgets::DrawText(surface, 88, 114,
+                    std::string("FAV: ") + (is_favorite ? "YES" : "NO") +
+                        " HIDE: " + (is_hidden ? "YES" : "NO"),
+                    theme.text_dim, 1);
+  widgets::DrawText(surface, 16, 136, filename, theme.text_dim, 1);
+  widgets::DrawText(surface, 16, 150,
+                    "META: " + (metadata_source.empty() ? "none" : metadata_source),
+                    theme.text_dim, 1);
+  if (!status.empty()) {
+    widgets::DrawText(surface, 16, 184, status, theme.text_dim, 1);
+  }
+  widgets::DrawText(surface, 16, 210, "A:RUN X:FAV Y:HIDE B:BACK", theme.text_dim, 1);
 }
 
 }  // namespace gb::ui::screens

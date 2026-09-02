@@ -24,11 +24,15 @@ struct ScanConfig {
 
 struct ScanStats {
   int systems_loaded = 0;
+  int roots_ok = 0;
+  int roots_unavailable = 0;
+  int roots_error = 0;
   int files_seen = 0;
   int games_upserted = 0;
   int total_games = 0;
   int present_games = 0;
   int missing_games = 0;
+  std::vector<LibraryRootState> roots;
   std::vector<std::string> warnings;
 };
 

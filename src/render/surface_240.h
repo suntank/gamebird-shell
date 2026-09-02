@@ -35,6 +35,13 @@ class Surface240 {
   void Clear(std::uint16_t color);
   void FillRect(int x, int y, int w, int h, std::uint16_t color);
   void StrokeRect(int x, int y, int w, int h, std::uint16_t color);
+  void BlitScaled(const std::uint16_t* source,
+                  int source_width,
+                  int source_height,
+                  int x,
+                  int y,
+                  int width,
+                  int height);
 
   void ClearDirtyRects();
   [[nodiscard]] const std::vector<Rect>& DirtyRects() const;
