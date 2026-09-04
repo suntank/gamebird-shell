@@ -1,0 +1,129 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Waveshare GamePi13 controls for Raspberry Pi.
+ *
+ * Every switch is active-low and connects its GPIO to ground.  This overlay
+ * deliberately uses the in-tree gpio-keys driver instead of an out-of-tree
+ * polling module.  Numeric constants keep the file directly compilable by
+ * dtc without requiring kernel headers on the target:
+ *
+ *   GPIO_ACTIVE_LOW = 1
+ *   BTN_A/B/X/Y      = 304/305/307/308
+ *   BTN_TL/TR        = 310/311
+ *   BTN_SELECT/START = 314/315
+ *   BTN_DPAD_*       = 544..547
+ */
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&gpio>;
+		__overlay__ {
+			gamebird_control_pins: gamebird_control_pins {
+				brcm,pins = <5 6 13 16 19 26 21 20 15 12 23 14>;
+				brcm,function = <0 0 0 0 0 0 0 0 0 0 0 0>;
+				brcm,pull = <2 2 2 2 2 2 2 2 2 2 2 2>;
+			};
+		};
+	};
+
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+			gamebird_controls: gamebird-controls {
+				compatible = "gpio-keys";
+				label = "GameBird Controls";
+				pinctrl-names = "default";
+				pinctrl-0 = <&gamebird_control_pins>;
+				status = "okay";
+
+				button-up {
+					label = "GameBird Up";
+					linux,code = <544>;
+					gpios = <&gpio 5 1>;
+					debounce-interval = <20>;
+				};
+
+				button-down {
+					label = "GameBird Down";
+					linux,code = <545>;
+					gpios = <&gpio 6 1>;
+					debounce-interval = <20>;
+				};
+
+				button-left {
+					label = "GameBird Left";
+					linux,code = <546>;
+					gpios = <&gpio 16 1>;
+					debounce-interval = <20>;
+				};
+
+				button-right {
+					label = "GameBird Right";
+					linux,code = <547>;
+					gpios = <&gpio 13 1>;
+					debounce-interval = <20>;
+				};
+
+				button-a {
+					label = "GameBird A";
+					linux,code = <304>;
+					gpios = <&gpio 21 1>;
+					debounce-interval = <20>;
+				};
+
+				button-b {
+					label = "GameBird B";
+					linux,code = <305>;
+					gpios = <&gpio 20 1>;
+					debounce-interval = <20>;
+				};
+
+				button-x {
+					label = "GameBird X";
+					linux,code = <307>;
+					gpios = <&gpio 15 1>;
+					debounce-interval = <20>;
+				};
+
+				button-y {
+					label = "GameBird Y";
+					linux,code = <308>;
+					gpios = <&gpio 12 1>;
+					debounce-interval = <20>;
+				};
+
+				button-l {
+					label = "GameBird L";
+					linux,code = <310>;
+					gpios = <&gpio 23 1>;
+					debounce-interval = <20>;
+				};
+
+				button-r {
+					label = "GameBird R";
+					linux,code = <311>;
+					gpios = <&gpio 14 1>;
+					debounce-interval = <20>;
+				};
+
+				button-start {
+					label = "GameBird Start";
+					linux,code = <315>;
+					gpios = <&gpio 26 1>;
+					debounce-interval = <20>;
+				};
+
+				button-select {
+					label = "GameBird Select";
+					linux,code = <314>;
+					gpios = <&gpio 19 1>;
+					debounce-interval = <20>;
+				};
+			};
+		};
+	};
+};

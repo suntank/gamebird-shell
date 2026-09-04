@@ -79,6 +79,7 @@ struct AssetCandidate {
   std::string title;
   std::string filename;
   std::string rom_path;
+  std::string box_art_path;
 };
 
 struct LaunchInfo {
@@ -119,10 +120,13 @@ struct MetadataCandidate {
 struct MetadataUpdate {
   int game_id = 0;
   int release_year = 0;
+  std::string publisher;
+  std::string developer;
   std::string genre;
   int players = 1;
   std::string description;
   std::string source;
+  std::string source_id;
 };
 
 class Database {

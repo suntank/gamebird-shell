@@ -25,6 +25,7 @@ class FbdevPresenter {
   void SetConsoleCursorVisible(bool visible);
   void BlitRgb565(const render::Surface240& surface, const render::Rect& rect);
   void BlitXrgb8888(const render::Surface240& surface, const render::Rect& rect);
+  void BlitScaled(const render::Surface240& surface);
   render::Rect ClampRect(const render::Rect& rect,
                          int max_w,
                          int max_h) const;

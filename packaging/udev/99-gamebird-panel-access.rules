@@ -1,0 +1,5 @@
+# The SPI panel is GameBird's permanent display, not a hot-plug desktop seat
+# device. This rule deliberately runs after systemd's 73-seat-late.rules: the
+# uaccess builtin may have installed an explicit per-user deny ACL earlier in
+# boot, and that ACL overrides membership in the video group.
+ACTION!="remove", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="spi0.0", GROUP="video", MODE="0660", TAG-="uaccess", RUN+="/usr/bin/setfacl -m u:gamebird:rw- $env{DEVNAME}"

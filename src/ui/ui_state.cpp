@@ -11,11 +11,11 @@ constexpr int kHomeItemCount = 5;
 void HandleButton(UIState& state, const platform::Button button) {
   switch (button) {
     case platform::Button::Start:
-      state.show_diagnostics = !state.show_diagnostics;
+      state.screen = state.screen == Screen::Home ? Screen::Systems : Screen::Home;
       state.needs_redraw = true;
       return;
     case platform::Button::Select:
-      state.screen = Screen::Home;
+      state.screen = Screen::Systems;
       state.needs_redraw = true;
       return;
     default:
@@ -45,13 +45,13 @@ void HandleButton(UIState& state, const platform::Button button) {
           state.list_context = "Favorites";
           break;
         case 2:
-          state.screen = Screen::Systems;
-          break;
-        case 3:
           state.screen = Screen::Tools;
           break;
-        case 4:
+        case 3:
           state.screen = Screen::Settings;
+          break;
+        case 4:
+          state.screen = Screen::Systems;
           break;
         default:
           state.screen = Screen::Home;
@@ -62,7 +62,9 @@ void HandleButton(UIState& state, const platform::Button button) {
     }
   } else {
     if (button == platform::Button::B) {
-      state.screen = Screen::Home;
+      if (state.screen != Screen::Systems) {
+        state.screen = Screen::Home;
+      }
       state.needs_redraw = true;
       return;
     }
@@ -73,9 +75,8 @@ void HandleButton(UIState& state, const platform::Button button) {
     }
   }
 
-  if (button == platform::Button::B && state.screen == Screen::Home) {
-    state.running = false;
-  }
+  // Exiting the shell is deliberately available from Tools, so B never
+  // terminates the shell from the Start menu.
 }
 
 const char* ScreenName(const Screen screen) {
@@ -90,6 +91,8 @@ const char* ScreenName(const Screen screen) {
       return "DETAILS";
     case Screen::Settings:
       return "SETTINGS";
+    case Screen::ScrapeProgress:
+      return "SCRAPING";
     case Screen::Tools:
       return "TOOLS";
     case Screen::InputSetup:
@@ -98,6 +101,8 @@ const char* ScreenName(const Screen screen) {
       return "INPUT TEST";
     case Screen::Bluetooth:
       return "BT";
+    case Screen::Wifi:
+      return "WIFI";
     case Screen::LaunchOptions:
       return "LAUNCH";
   }

@@ -1,0 +1,8 @@
+{
+  "id": "psx",
+  "name": "Sony PlayStation",
+  "rom_extensions": [".cue", ".chd", ".pbp", ".m3u", ".iso", ".img", ".ccd", ".toc", ".cbn"],
+  "launch_type": "retroarch",
+  "launch_template": "retroarch --appendconfig /home/gamebird/gamebird-shell/config/retroarch-gamebird.cfg|/home/gamebird/gamebird-shell/config/retroarch-psx.cfg|/run/gamebird-retroarch-input.cfg -L /home/gamebird/.config/retroarch/cores/pcsx_rearmed_libretro.so {rom_path}",
+  "extra_args": ""
+}

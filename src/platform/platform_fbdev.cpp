@@ -133,8 +133,50 @@ void FbdevPresenter::BlitXrgb8888(const render::Surface240& surface,
   }
 }
 
+void FbdevPresenter::BlitScaled(const render::Surface240& surface) {
+  if (bytes_per_pixel_ != 2 && bytes_per_pixel_ != 4) {
+    return;
+  }
+
+  // TV Mode uses the DRM framebuffer, which is normally much larger than the
+  // 240x240 shell canvas. Keep the square design intact, center it, and use
+  // nearest-neighbour scaling so the interface remains crisp on a television.
+  const int target = std::min(xres_, yres_);
+  const int origin_x = (xres_ - target) / 2;
+  const int origin_y = (yres_ - target) / 2;
+  const auto* source = surface.Pixels();
+
+  for (int y = 0; y < yres_; ++y) {
+    auto* row = map_ + ((y + yoffset_) * line_length_) + xoffset_ * bytes_per_pixel_;
+    for (int x = 0; x < xres_; ++x) {
+      const bool inside = x >= origin_x && x < origin_x + target &&
+                          y >= origin_y && y < origin_y + target;
+      const std::uint16_t pixel = inside
+          ? source[((y - origin_y) * surface.Height() / target) * surface.Width() +
+                   ((x - origin_x) * surface.Width() / target)]
+          : 0;
+      if (bytes_per_pixel_ == 2) {
+        reinterpret_cast<std::uint16_t*>(row)[x] = pixel;
+      } else {
+        const std::uint8_t r5 = static_cast<std::uint8_t>((pixel >> 11) & 0x1F);
+        const std::uint8_t g6 = static_cast<std::uint8_t>((pixel >> 5) & 0x3F);
+        const std::uint8_t b5 = static_cast<std::uint8_t>(pixel & 0x1F);
+        reinterpret_cast<std::uint32_t*>(row)[x] =
+            0xFF000000u | (static_cast<std::uint32_t>((r5 << 3) | (r5 >> 2)) << 16) |
+            (static_cast<std::uint32_t>((g6 << 2) | (g6 >> 4)) << 8) |
+            static_cast<std::uint32_t>((b5 << 3) | (b5 >> 2));
+      }
+    }
+  }
+}
+
 void FbdevPresenter::Present(const render::Surface240& surface) {
   if (!map_) {
+    return;
+  }
+
+  if (xres_ != surface.Width() || yres_ != surface.Height()) {
+    BlitScaled(surface);
     return;
   }
 

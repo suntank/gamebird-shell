@@ -65,11 +65,13 @@ int main() {
   const auto offline_root = temp.path / "roms.offline";
   const auto snes_dir = root / "snes";
   const auto rom = snes_dir / "Super Metroid.sfc";
+  const auto save = snes_dir / "Super Metroid.srm";
   std::filesystem::create_directories(systems);
   std::filesystem::create_directories(snes_dir);
   WriteText(systems / "snes.json",
             R"({"id":"snes","name":"Super Nintendo","rom_extensions":[".sfc"],"launch_type":"retroarch","launch_template":"retroarch {rom_path}"})");
   WriteText(rom, "ROM");
+  WriteText(save, "SAVE");
 
   gb::db::Database db;
   Expect(db.Open((temp.path / "catalog.db").string()), "open catalog");
@@ -79,7 +81,7 @@ int main() {
   Expect(stats.roots_ok == 1 && stats.roots_unavailable == 0,
          "available root is healthy");
   Expect(stats.present_games == 1 && stats.missing_games == 0,
-         "new ROM is present");
+         "new ROM is present and its save sidecar is ignored");
   Expect(stats.roots.size() == 1 && stats.roots[0].status == "ok",
          "healthy root state is reported");
 

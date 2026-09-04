@@ -17,8 +17,21 @@ enum class Button {
   Y,
   L,
   R,
+  L2,
+  R2,
+  L3,
+  R3,
   Start,
   Select,
+  Guide,
+  LeftStickUp,
+  LeftStickDown,
+  LeftStickLeft,
+  LeftStickRight,
+  RightStickUp,
+  RightStickDown,
+  RightStickLeft,
+  RightStickRight,
 };
 
 struct InputEvent {

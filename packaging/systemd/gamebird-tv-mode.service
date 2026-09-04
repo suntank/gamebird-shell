@@ -1,0 +1,13 @@
+[Unit]
+Description=GameBird HDMI TV Mode monitor
+After=gamebird-tv-mode-init.service gbshell.service
+Wants=gamebird-tv-mode-init.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/gamebird/tv-mode-manager.sh --watch
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

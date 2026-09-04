@@ -13,11 +13,23 @@ std::string BuildRetroArchInputConfig(
     const std::vector<std::pair<std::string, std::string>>& bindings,
     int joypad_index = -1);
 
+std::string BuildRetroArchInputConfig(
+    const std::string& device_name,
+    const std::vector<std::pair<std::string, std::string>>& bindings,
+    const std::vector<int>& active_joypad_indices);
+
 bool WriteRetroArchInputConfig(
     const std::string& path,
     const std::string& device_name,
     const std::vector<std::pair<std::string, std::string>>& bindings,
     int joypad_index,
+    std::string& error);
+
+bool WriteRetroArchInputConfig(
+    const std::string& path,
+    const std::string& device_name,
+    const std::vector<std::pair<std::string, std::string>>& bindings,
+    const std::vector<int>& active_joypad_indices,
     std::string& error);
 
 }  // namespace gb::core

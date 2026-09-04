@@ -2,6 +2,8 @@
   "show_diagnostics": false,
   "show_hidden_games": false,
   "enable_bluetooth_gamepads": true,
-  "preferred_input_device": "",
-  "input_profiles": ""
+  "preferred_input_device": "GameBird Controls",
+  "input_profiles": "GameBird Controls|Up=Up,Down=Down,Left=Left,Right=Right,A=A,B=B,X=Y,Y=X,L=L,R=R,Start=Start,Select=Select,RUp=btn:8,RDown=btn:9,RLeft=btn:10,RRight=btn:11,RA=btn:0,RB=btn:1,RX=btn:2,RY=btn:3,RL=btn:4,RR=btn:5,RStart=btn:7,RSelect=btn:6",
+  "scrape_provider": "libretro",
+  "scrape_overwrite_artwork": false
 }

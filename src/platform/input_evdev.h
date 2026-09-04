@@ -31,7 +31,7 @@ class EvdevInput {
   EvdevInput() = default;
   ~EvdevInput();
 
-  bool Init(const std::string& device_path);
+  bool Init(const std::string& device_path, bool grab_input = true);
   bool WaitAndPoll(InputFrame& out, int timeout_ms);
   void Shutdown();
   void ReleaseDeviceGrabs();
@@ -71,6 +71,12 @@ class EvdevInput {
     std::array<std::uint64_t, KEY_MAX + 1> key_down_ms {};
     AxisState abs_x;
     AxisState abs_y;
+    AxisState abs_rx;
+    AxisState abs_ry;
+    AxisState abs_z;
+    AxisState abs_rz;
+    AxisState abs_brake;
+    AxisState abs_gas;
     std::unordered_map<unsigned short, int> js_button_index;
     std::unordered_map<unsigned short, int> js_axis_index;
   };
@@ -88,6 +94,7 @@ class EvdevInput {
   std::string device_path_;
   std::string requested_path_;
   bool auto_mode_ = false;
+  bool grab_input_ = true;
   bool devices_changed_ = false;
   std::uint64_t last_refresh_ms_ = 0;
 };

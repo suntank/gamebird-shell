@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -24,6 +26,7 @@ struct Args {
   bool mode_jobs_once = false;
   bool mode_daemon = false;
   int poll_seconds = 2;
+  int rescan_seconds = 10;
 
   bool enqueue_default = false;
   bool enqueue_scan = false;
@@ -83,6 +86,13 @@ Args ParseArgs(const int argc, char** argv) {
       out.poll_seconds = std::atoi(argv[++i]);
       if (out.poll_seconds < 1) {
         out.poll_seconds = 1;
+      }
+      continue;
+    }
+    if (arg == "--rescan-seconds" && i + 1 < argc) {
+      out.rescan_seconds = std::atoi(argv[++i]);
+      if (out.rescan_seconds < 2) {
+        out.rescan_seconds = 2;
       }
       continue;
     }
@@ -151,6 +161,51 @@ int RunScanOnce(gb::db::Database& db, const Args& args) {
   }
 
   return 0;
+}
+
+std::vector<std::string> LibrarySnapshot(const Args& args) {
+  std::vector<std::string> roots = args.roots;
+  if (roots.empty()) {
+    std::string error;
+    gb::db::LoadLibraryRootsFromDefaults(args.defaults_json, roots, error);
+  }
+
+  std::vector<std::string> snapshot;
+  for (const auto& root : roots) {
+    std::error_code ec;
+    const auto status = std::filesystem::status(root, ec);
+    if (ec || !std::filesystem::is_directory(status)) {
+      snapshot.push_back(root + "\n<unavailable>");
+      continue;
+    }
+
+    std::filesystem::recursive_directory_iterator it(root, ec), end;
+    if (ec) {
+      snapshot.push_back(root + "\n<unreadable>");
+      continue;
+    }
+    while (it != end) {
+      const auto& entry = *it;
+      std::error_code entry_ec;
+      std::string item = entry.path().lexically_normal().string();
+      item += '\n';
+      item += std::to_string(entry.last_write_time(entry_ec).time_since_epoch().count());
+      if (entry_ec) {
+        item += "\n<stat-error>";
+      } else if (entry.is_regular_file(entry_ec) && !entry_ec) {
+        item += '\n';
+        item += std::to_string(entry.file_size(entry_ec));
+      }
+      snapshot.push_back(std::move(item));
+      it.increment(ec);
+      if (ec) {
+        snapshot.push_back(root + "\n<traversal-error>");
+        break;
+      }
+    }
+  }
+  std::sort(snapshot.begin(), snapshot.end());
+  return snapshot;
 }
 
 void EnqueueRequestedJobs(gb::db::Database& db, const Args& args) {
@@ -237,9 +292,31 @@ int main(int argc, char** argv) {
   if (args.mode_daemon) {
     gb::core::Log(gb::core::LogLevel::Info,
                   "daemon mode poll_seconds=" +
-                      std::to_string(args.poll_seconds));
+                      std::to_string(args.poll_seconds) +
+                      " rescan_seconds=" +
+                      std::to_string(args.rescan_seconds));
+
+    // Samba uploads bypass the UI's explicit Rescan action. Scan once when
+    // the daemon starts, then watch a lightweight metadata snapshot so a new,
+    // replaced, renamed, or removed ROM is reflected automatically without
+    // continuously rewriting the catalog database.
+    RunScanOnce(db, args);
+    auto library_snapshot = LibrarySnapshot(args);
+    auto next_rescan = std::chrono::steady_clock::now() +
+                       std::chrono::seconds(args.rescan_seconds);
 
     while (true) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_rescan) {
+        auto current_snapshot = LibrarySnapshot(args);
+        if (current_snapshot != library_snapshot) {
+          if (RunScanOnce(db, args) == 0) {
+            library_snapshot = std::move(current_snapshot);
+          }
+        }
+        next_rescan = now + std::chrono::seconds(args.rescan_seconds);
+      }
+
       std::string info;
       if (!gb::scrape::ProcessOneQueuedJob(db, worker_cfg, worker_stats, info)) {
         gb::core::SleepMs(static_cast<std::uint32_t>(args.poll_seconds * 1000));

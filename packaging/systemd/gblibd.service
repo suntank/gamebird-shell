@@ -8,7 +8,7 @@ Type=simple
 User=gamebird
 Group=gamebird
 WorkingDirectory=/home/gamebird/gamebird-shell
-ExecStart=/home/gamebird/gamebird-shell/build/gblibd --db /home/gamebird/gamebird-shell/data/catalog.db --defaults /home/gamebird/gamebird-shell/config/defaults.pi.json --systems-dir /home/gamebird/gamebird-shell/config/systems.d --daemon --poll-seconds 2
+ExecStart=/home/gamebird/gamebird-shell/build/gblibd --db /home/gamebird/gamebird-shell/data/catalog.db --defaults /home/gamebird/gamebird-shell/config/defaults.pi.json --systems-dir /home/gamebird/gamebird-shell/config/systems.d --daemon --poll-seconds 2 --rescan-seconds 10
 Restart=on-failure
 RestartSec=1
 

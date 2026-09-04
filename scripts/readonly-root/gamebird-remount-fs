@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -eu
+
+# systemd 257's remount helper asks an already-configured OverlayFS root to
+# reconfigure itself. Linux rejects that with EINVAL ("No changes allowed in
+# reconfigure"), leaving systemd-remount-fs failed and blocking Raspberry Pi
+# OS's zram setup. The initramfs has already mounted both the overlay and its
+# read-only lower filesystem with the intended options, so no remount is
+# needed in protected mode. Preserve the stock helper for maintenance boots.
+if [ "$(findmnt -n -o FSTYPE /)" = "overlay" ]; then
+  exit 0
+fi
+
+exec /usr/lib/systemd/systemd-remount-fs

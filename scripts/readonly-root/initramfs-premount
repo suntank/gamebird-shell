@@ -1,0 +1,96 @@
+#!/bin/sh
+
+set -u
+export LANG=C
+
+case "${1:-}" in
+  prereqs)
+    exit 0
+    ;;
+esac
+
+if ! grep -qw gamebird_repartition /proc/cmdline; then
+  exit 0
+fi
+
+. /scripts/functions
+
+disk=/dev/mmcblk0
+root_part=/dev/mmcblk0p2
+data_part=/dev/mmcblk0p3
+expected_disk_sectors=122191872
+expected_root_start=1064960
+original_root_end=122191871
+target_root_end=22036479
+data_start=22036480
+
+fail() {
+  panic "GameBird repartition stopped: $*"
+}
+
+log_begin_msg "Preparing GameBird persistent data partition"
+
+[ -b "$disk" ] || fail "$disk is missing"
+[ -b "$root_part" ] || fail "$root_part is missing"
+[ "$(cat /sys/block/mmcblk0/size)" = "$expected_disk_sectors" ] ||
+  fail "SD-card size differs from the audited layout"
+
+partition_table="$(parted -m "$disk" unit s print 2>/dev/null)" ||
+  fail "unable to read partition table"
+
+if printf '%s\n' "$partition_table" | grep -q '^3:'; then
+  log_success_msg "GameBird data partition already exists"
+  log_end_msg
+  exit 0
+fi
+
+root_line="$(printf '%s\n' "$partition_table" | grep '^2:' || true)"
+root_start="$(printf '%s' "$root_line" | cut -d: -f2 | tr -d s)"
+root_end="$(printf '%s' "$root_line" | cut -d: -f3 | tr -d s)"
+
+[ "$root_start" = "$expected_root_start" ] ||
+  fail "root partition start is not the audited value"
+case "$root_end" in
+  "$original_root_end"|"$target_root_end") ;;
+  *) fail "root partition end is neither original nor staged" ;;
+esac
+
+log_begin_msg "Checking and shrinking root filesystem to 9 GiB"
+set +e
+e2fsck -f -p "$root_part"
+fsck_result=$?
+set -e
+case "$fsck_result" in
+  0|1) ;;
+  *) fail "e2fsck returned $fsck_result" ;;
+esac
+resize2fs "$root_part" 9G || fail "resize2fs failed"
+log_end_msg
+
+if [ "$root_end" = "$original_root_end" ]; then
+  log_begin_msg "Shrinking root partition to 10 GiB"
+  # GNU Parted deliberately requires an explicit confirmation for a shrink,
+  # even in script mode. The audited filesystem has already been reduced to
+  # 9 GiB, leaving a full 1 GiB safety margin inside this partition boundary.
+  printf 'Yes\n' | parted ---pretend-input-tty "$disk" unit s \
+    resizepart 2 "${target_root_end}s" ||
+    fail "root partition resize failed"
+  partprobe "$disk" || true
+  udevadm settle || true
+  log_end_msg
+fi
+
+log_begin_msg "Creating persistent data partition"
+parted -s "$disk" unit s mkpart primary ext4 "${data_start}s" 100% ||
+  fail "data partition creation failed"
+partprobe "$disk" || true
+udevadm settle || true
+[ -b "$data_part" ] || fail "$data_part did not appear"
+mke2fs -q -t ext4 -L GAMEBIRD-DATA "$data_part" ||
+  fail "data filesystem creation failed"
+sync
+log_end_msg
+
+log_success_msg "GameBird persistent partition is ready"
+log_end_msg
+exit 0

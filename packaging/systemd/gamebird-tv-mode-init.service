@@ -1,0 +1,8 @@
+[Unit]
+Description=GameBird TV Mode initial state
+Before=gbshell.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/gamebird/tv-mode-manager.sh --apply
+RemainAfterExit=yes

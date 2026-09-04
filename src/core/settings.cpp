@@ -111,6 +111,12 @@ bool LoadRuntimeSettings(const std::string& path,
   if (ExtractString(text, "input_profiles", s)) {
     out.input_profiles = s;
   }
+  if (ExtractString(text, "scrape_provider", s)) {
+    out.scrape_provider = s;
+  }
+  if (ExtractBool(text, "scrape_overwrite_artwork", v)) {
+    out.scrape_overwrite_artwork = v;
+  }
 
   return true;
 }
@@ -143,7 +149,11 @@ bool SaveRuntimeSettings(const std::string& path,
   out << "  \"preferred_input_device\": \""
       << EscapeJsonString(settings.preferred_input_device) << "\",\n";
   out << "  \"input_profiles\": \""
-      << EscapeJsonString(settings.input_profiles) << "\"\n";
+      << EscapeJsonString(settings.input_profiles) << "\",\n";
+  out << "  \"scrape_provider\": \""
+      << EscapeJsonString(settings.scrape_provider) << "\",\n";
+  out << "  \"scrape_overwrite_artwork\": "
+      << (settings.scrape_overwrite_artwork ? "true" : "false") << "\n";
   out << "}\n";
 
   if (!out.good()) {

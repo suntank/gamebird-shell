@@ -182,21 +182,32 @@ std::string DetectSystemId(const std::filesystem::path& root,
                            const std::vector<SystemDefinition>& systems,
                            const std::unordered_map<std::string, std::string>&
                                extension_to_system) {
+  const auto ext = ToLower(file.extension().string());
+  const auto accepts_extension = [&](const SystemDefinition* system) {
+    return system != nullptr &&
+           std::find(system->rom_extensions.begin(),
+                     system->rom_extensions.end(), ext) !=
+               system->rom_extensions.end();
+  };
+
   std::error_code ec;
   const auto rel = std::filesystem::relative(file, root, ec);
   if (!ec && !rel.empty()) {
     const auto first = (*rel.begin()).string();
-    if (FindSystemById(systems, first)) {
-      return first;
+    const auto* system = FindSystemById(systems, first);
+    if (system != nullptr) {
+      // A recognized folder selects the system, but it must not turn save
+      // files, screenshots, or other sidecars into launchable games.
+      return accepts_extension(system) ? first : std::string{};
     }
   }
 
   const auto root_name = root.filename().string();
-  if (FindSystemById(systems, root_name)) {
-    return root_name;
+  const auto* root_system = FindSystemById(systems, root_name);
+  if (root_system != nullptr) {
+    return accepts_extension(root_system) ? root_name : std::string{};
   }
 
-  const auto ext = ToLower(file.extension().string());
   const auto it = extension_to_system.find(ext);
   if (it != extension_to_system.end()) {
     return it->second;

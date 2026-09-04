@@ -1,0 +1,14 @@
+[Unit]
+Description=GameBird in-game battery HUD monitor
+After=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=gamebird
+Group=gamebird
+ExecStart=/home/gamebird/gamebird-shell/build/gbhud
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

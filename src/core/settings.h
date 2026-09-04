@@ -10,6 +10,8 @@ struct RuntimeSettings {
   bool enable_bluetooth_gamepads = true;
   std::string preferred_input_device;
   std::string input_profiles;
+  std::string scrape_provider = "libretro";
+  bool scrape_overwrite_artwork = false;
 };
 
 bool LoadRuntimeSettings(const std::string& path,

@@ -8,6 +8,7 @@
 #include "core/logging.h"
 #include "db/queries.h"
 #include "scrape/providers/provider_local_dat.h"
+#include "scrape/providers/provider_libretro.h"
 #include "scrape/providers/provider_none.h"
 
 namespace gb::scrape {
@@ -132,12 +133,141 @@ bool RunArtworkIndexJob(db::Database& db,
   return true;
 }
 
-bool RunPlaceholderJob(const std::string& type, std::string& info) {
-  info = type + " placeholder ok";
+bool RunScrapeJob(db::Database& db,
+                  const WorkerConfig& cfg,
+                  WorkerStats& stats,
+                  std::string& info,
+                  std::string& error) {
+  ScrapeSession session;
+  ScrapeProgress progress;
+  if (!session.Begin(db, cfg, progress)) {
+    error = progress.last_error.empty() ? "could not prepare scrape" : progress.last_error;
+    return false;
+  }
+  while (!progress.finished) {
+    if (!session.ProcessNext(db, progress)) {
+      error = progress.last_error.empty() ? "scrape failed" : progress.last_error;
+      return false;
+    }
+  }
+
+  stats.scrape_downloaded += progress.downloaded;
+  stats.scrape_skipped += progress.skipped_existing;
+  stats.scrape_matched += progress.matched;
+  stats.artwork_indexed += progress.downloaded;
+  stats.artwork_missing += progress.missing;
+  info = "scrape ok downloaded=" + std::to_string(progress.downloaded) +
+         " skipped=" + std::to_string(progress.skipped_existing) +
+         " missing=" + std::to_string(progress.missing);
+  return true;
+}
+
+bool RunDownloadCompatibilityJob(std::string& info) {
+  info = "download_art already handled by scrape";
   return true;
 }
 
 }  // namespace
+
+bool ScrapeSession::Begin(db::Database& db,
+                          const WorkerConfig& cfg,
+                          ScrapeProgress& progress) {
+  cfg_ = cfg;
+  games_.clear();
+  next_game_ = 0;
+  active_ = false;
+  progress = ScrapeProgress{};
+
+  if (cfg.provider != "libretro") {
+    progress.last_error = cfg.provider == "none" ? "scraping is disabled"
+                                                   : "unknown scraper: " + cfg.provider;
+    return false;
+  }
+
+  std::vector<db::AssetCandidate> candidates;
+  if (!db.ListPresentAssetCandidates(candidates)) {
+    progress.last_error = db.LastError();
+    return false;
+  }
+
+  for (const auto& game : candidates) {
+    std::error_code ec;
+    if (!cfg.overwrite_artwork && !game.box_art_path.empty() &&
+        std::filesystem::is_regular_file(game.box_art_path, ec) && !ec) {
+      ++progress.skipped_existing;
+      continue;
+    }
+    games_.push_back(game);
+  }
+
+  progress.total = static_cast<int>(games_.size());
+  progress.finished = games_.empty();
+  active_ = !progress.finished;
+  return true;
+}
+
+bool ScrapeSession::ProcessNext(db::Database& db, ScrapeProgress& progress) {
+  if (progress.finished || !active_) {
+    progress.finished = true;
+    return true;
+  }
+  if (next_game_ >= games_.size()) {
+    progress.finished = true;
+    active_ = false;
+    return true;
+  }
+
+  const auto& game = games_[next_game_++];
+  progress.current_title = game.title;
+  const std::filesystem::path rom_path(game.rom_path);
+  const std::filesystem::path destination =
+      std::filesystem::path(cfg_.artwork_dir) / game.system_id /
+      (rom_path.stem().string() + ".png");
+  const auto scraped = provider_.Scrape(game.system_id, game.title,
+                                         destination.string());
+  ++progress.completed;
+  if (scraped.matched) ++progress.matched;
+
+  if (!scraped.matched || !scraped.downloaded) {
+    ++progress.missing;
+    if (!scraped.error.empty()) progress.last_error = scraped.error;
+  } else {
+    if (!db.UpsertGameBoxArt(game.game_id, scraped.artwork_path)) {
+      progress.last_error = db.LastError();
+      active_ = false;
+      return false;
+    }
+    ++progress.downloaded;
+
+    db::GameDetails existing;
+    db.GetGameDetails(game.game_id, existing);
+    db::MetadataUpdate metadata;
+    metadata.game_id = game.game_id;
+    metadata.release_year = scraped.metadata.release_year > 0
+                                ? scraped.metadata.release_year
+                                : existing.release_year;
+    metadata.publisher = scraped.metadata.publisher;
+    metadata.developer = scraped.metadata.developer;
+    metadata.genre = scraped.metadata.genre.empty() ? existing.genre
+                                                     : scraped.metadata.genre;
+    metadata.players = scraped.metadata.players > 0 ? scraped.metadata.players
+                                                     : existing.players;
+    metadata.description = existing.description;
+    metadata.source = "libretro";
+    metadata.source_id = scraped.matched_title;
+    if (!db.UpsertGameMetadata(metadata)) {
+      progress.last_error = db.LastError();
+      active_ = false;
+      return false;
+    }
+  }
+
+  if (next_game_ >= games_.size()) {
+    progress.finished = true;
+    active_ = false;
+  }
+  return true;
+}
 
 void EnqueueDefaultJobs(db::Database& db,
                         const bool include_scan,
@@ -177,8 +307,10 @@ bool ProcessOneQueuedJob(db::Database& db,
     ok = RunIdentifyJob(db, cfg, stats, step_info, step_error);
   } else if (job.type == "build_thumb") {
     ok = RunArtworkIndexJob(db, cfg, stats, step_info, step_error);
-  } else if (job.type == "scrape" || job.type == "download_art") {
-    ok = RunPlaceholderJob(job.type, step_info);
+  } else if (job.type == "scrape") {
+    ok = RunScrapeJob(db, cfg, stats, step_info, step_error);
+  } else if (job.type == "download_art") {
+    ok = RunDownloadCompatibilityJob(step_info);
   } else {
     step_error = "unknown job type: " + job.type;
   }

@@ -144,11 +144,20 @@ bool SDLPresenter::MapFromController(const int button, Button& out_button) {
     case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
       out_button = Button::R;
       return true;
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+      out_button = Button::L3;
+      return true;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+      out_button = Button::R3;
+      return true;
     case SDL_CONTROLLER_BUTTON_START:
       out_button = Button::Start;
       return true;
     case SDL_CONTROLLER_BUTTON_BACK:
       out_button = Button::Select;
+      return true;
+    case SDL_CONTROLLER_BUTTON_GUIDE:
+      out_button = Button::Guide;
       return true;
     default:
       return false;

@@ -1,0 +1,12 @@
+[Unit]
+Description=GameBird SPI panel access repair
+After=systemd-udev-trigger.service
+Before=gbshell.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/gamebird/gamebird-shell/scripts/ensure-panel-access.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

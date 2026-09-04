@@ -1,0 +1,8 @@
+{
+  "id": "n64",
+  "name": "Nintendo 64",
+  "rom_extensions": [".z64", ".n64", ".v64", ".zip", ".7z"],
+  "launch_type": "retroarch",
+  "launch_template": "retroarch --appendconfig /home/gamebird/gamebird-shell/config/retroarch-gamebird.cfg|/home/gamebird/gamebird-shell/config/retroarch-n64.cfg|/run/gamebird-retroarch-input.cfg -L /home/gamebird/.config/retroarch/cores/mupen64plus_libretro.so {rom_path}",
+  "extra_args": ""
+}

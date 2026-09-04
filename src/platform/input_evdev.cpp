@@ -314,30 +314,34 @@ bool EvdevInput::OpenDevicePath(const std::string& path, const bool grab_input) 
   dev.is_keyboard = probe.is_keyboard;
   PopulateJoystickMaps(dev);
 
-  // Some low-cost USB pads expose D-pad as ABS_X/ABS_Y instead of HAT axes.
+  // Controllers commonly expose the D-pad as HAT0 while still using ABS_X/Y
+  // and ABS_RX/RY for their analog sticks. Configure every standard gamepad
+  // axis independently: restricting ABS_X/Y to pads without HAT0 makes the
+  // sticks disappear on Xbox-style controllers.
   const auto abs_bits = ReadEventBits(fd, EV_ABS, ABS_MAX);
-  const bool has_hat_axes = TestBit(abs_bits, ABS_HAT0X) || TestBit(abs_bits, ABS_HAT0Y);
-  if (!has_hat_axes) {
-    input_absinfo abs_x_info {};
-    if (ioctl(fd, EVIOCGABS(ABS_X), &abs_x_info) == 0) {
-      dev.abs_x.present = true;
-      dev.abs_x.min = abs_x_info.minimum;
-      dev.abs_x.max = abs_x_info.maximum;
-      dev.abs_x.center = (abs_x_info.minimum + abs_x_info.maximum) / 2;
-      const int span = std::max(0, abs_x_info.maximum - abs_x_info.minimum);
-      dev.abs_x.deadzone = std::max(abs_x_info.flat, std::max(1, span / 6));
+  auto configure_axis = [&](const unsigned short code, Device::AxisState& axis) {
+    if (!TestBit(abs_bits, code)) {
+      return;
     }
-
-    input_absinfo abs_y_info {};
-    if (ioctl(fd, EVIOCGABS(ABS_Y), &abs_y_info) == 0) {
-      dev.abs_y.present = true;
-      dev.abs_y.min = abs_y_info.minimum;
-      dev.abs_y.max = abs_y_info.maximum;
-      dev.abs_y.center = (abs_y_info.minimum + abs_y_info.maximum) / 2;
-      const int span = std::max(0, abs_y_info.maximum - abs_y_info.minimum);
-      dev.abs_y.deadzone = std::max(abs_y_info.flat, std::max(1, span / 6));
+    input_absinfo info {};
+    if (ioctl(fd, EVIOCGABS(code), &info) != 0) {
+      return;
     }
-  }
+    axis.present = true;
+    axis.min = info.minimum;
+    axis.max = info.maximum;
+    axis.center = (info.minimum + info.maximum) / 2;
+    const int span = std::max(0, info.maximum - info.minimum);
+    axis.deadzone = std::max(info.flat, std::max(1, span / 6));
+  };
+  configure_axis(ABS_X, dev.abs_x);
+  configure_axis(ABS_Y, dev.abs_y);
+  configure_axis(ABS_RX, dev.abs_rx);
+  configure_axis(ABS_RY, dev.abs_ry);
+  configure_axis(ABS_Z, dev.abs_z);
+  configure_axis(ABS_RZ, dev.abs_rz);
+  configure_axis(ABS_BRAKE, dev.abs_brake);
+  configure_axis(ABS_GAS, dev.abs_gas);
 
   if (grab_input) {
     if (ioctl(fd, EVIOCGRAB, 1) == 0) {
@@ -403,10 +407,11 @@ void EvdevInput::PopulateJoystickMaps(Device& dev) {
   close(js_fd);
 }
 
-bool EvdevInput::Init(const std::string& device_path) {
+bool EvdevInput::Init(const std::string& device_path, const bool grab_input) {
   Shutdown();
   requested_path_ = device_path;
   auto_mode_ = (device_path == "auto");
+  grab_input_ = grab_input;
   last_refresh_ms_ = 0;
   if (!RefreshDevices(true) || devices_.empty()) {
     core::Log(core::LogLevel::Error,
@@ -493,7 +498,7 @@ bool EvdevInput::RefreshDevices(const bool force) {
   }
   for (const auto& path : desired) {
     if (!open_paths.count(path)) {
-      OpenDevicePath(path, true);
+      OpenDevicePath(path, grab_input_);
     }
   }
   RebuildDevicePath();
@@ -568,7 +573,6 @@ bool EvdevInput::MapKeyCode(const unsigned short code,
       return true;
 
     case BTN_TL:
-    case BTN_TL2:
     case BTN_PINKIE:
     case BTN_4:
     case KEY_Q:
@@ -576,11 +580,26 @@ bool EvdevInput::MapKeyCode(const unsigned short code,
       return true;
 
     case BTN_TR:
-    case BTN_TR2:
     case BTN_BASE5:
     case BTN_5:
     case KEY_E:
       out_button = Button::R;
+      return true;
+
+    case BTN_TL2:
+      out_button = Button::L2;
+      return true;
+
+    case BTN_TR2:
+      out_button = Button::R2;
+      return true;
+
+    case BTN_THUMBL:
+      out_button = Button::L3;
+      return true;
+
+    case BTN_THUMBR:
+      out_button = Button::R3;
       return true;
 
     case BTN_START:
@@ -596,6 +615,10 @@ bool EvdevInput::MapKeyCode(const unsigned short code,
     case KEY_LEFTSHIFT:
     case KEY_RIGHTSHIFT:
       out_button = Button::Select;
+      return true;
+
+    case BTN_MODE:
+      out_button = Button::Guide;
       return true;
 
     case KEY_ESC:
@@ -844,6 +867,43 @@ bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
         }
 
         if (ev.type == EV_ABS) {
+          auto process_directional_axis = [&](Device::AxisState& axis,
+                                              const Button negative,
+                                              const Button positive) {
+            if (!axis.present) {
+              return;
+            }
+            int direction = 0;
+            if (ev.value < axis.center - axis.deadzone) {
+              direction = -1;
+            } else if (ev.value > axis.center + axis.deadzone) {
+              direction = 1;
+            }
+            if (direction == axis.last_dir) {
+              return;
+            }
+            axis.last_dir = direction;
+            if (direction < 0) {
+              push_event(negative, ev, true, 0);
+            } else if (direction > 0) {
+              push_event(positive, ev, true, 0);
+            }
+          };
+          auto process_trigger_axis = [&](Device::AxisState& axis,
+                                          const Button button) {
+            if (!axis.present) {
+              return;
+            }
+            const bool active = ev.value > axis.min + axis.deadzone;
+            const int state = active ? 1 : 0;
+            if (state == axis.last_dir) {
+              return;
+            }
+            axis.last_dir = state;
+            if (active) {
+              push_event(button, ev, true, 0);
+            }
+          };
           if (ev.code == ABS_HAT0X) {
             if (ev.value < 0) {
               push_event(Button::Left, ev, true, 0);
@@ -856,38 +916,26 @@ bool EvdevInput::WaitAndPoll(InputFrame& out, const int timeout_ms) {
             } else if (ev.value > 0) {
               push_event(Button::Down, ev, true, 0);
             }
-          } else if (ev.code == ABS_X && devices_[i].abs_x.present) {
-            auto& axis = devices_[i].abs_x;
-            int dir = 0;
-            if (ev.value < (axis.center - axis.deadzone)) {
-              dir = -1;
-            } else if (ev.value > (axis.center + axis.deadzone)) {
-              dir = 1;
-            }
-            if (dir != axis.last_dir) {
-              axis.last_dir = dir;
-              if (dir < 0) {
-                push_event(Button::Left, ev, true, 0);
-              } else if (dir > 0) {
-                push_event(Button::Right, ev, true, 0);
-              }
-            }
-          } else if (ev.code == ABS_Y && devices_[i].abs_y.present) {
-            auto& axis = devices_[i].abs_y;
-            int dir = 0;
-            if (ev.value < (axis.center - axis.deadzone)) {
-              dir = -1;
-            } else if (ev.value > (axis.center + axis.deadzone)) {
-              dir = 1;
-            }
-            if (dir != axis.last_dir) {
-              axis.last_dir = dir;
-              if (dir < 0) {
-                push_event(Button::Up, ev, true, 0);
-              } else if (dir > 0) {
-                push_event(Button::Down, ev, true, 0);
-              }
-            }
+          } else if (ev.code == ABS_X) {
+            process_directional_axis(devices_[i].abs_x, Button::LeftStickLeft,
+                                     Button::LeftStickRight);
+          } else if (ev.code == ABS_Y) {
+            process_directional_axis(devices_[i].abs_y, Button::LeftStickUp,
+                                     Button::LeftStickDown);
+          } else if (ev.code == ABS_RX) {
+            process_directional_axis(devices_[i].abs_rx, Button::RightStickLeft,
+                                     Button::RightStickRight);
+          } else if (ev.code == ABS_RY) {
+            process_directional_axis(devices_[i].abs_ry, Button::RightStickUp,
+                                     Button::RightStickDown);
+          } else if (ev.code == ABS_Z) {
+            process_trigger_axis(devices_[i].abs_z, Button::L2);
+          } else if (ev.code == ABS_RZ) {
+            process_trigger_axis(devices_[i].abs_rz, Button::R2);
+          } else if (ev.code == ABS_BRAKE) {
+            process_trigger_axis(devices_[i].abs_brake, Button::L2);
+          } else if (ev.code == ABS_GAS) {
+            process_trigger_axis(devices_[i].abs_gas, Button::R2);
           }
         }
 

@@ -89,6 +89,14 @@ int main() {
   Expect(details.box_art_path == artwork_path.string(),
          "details expose indexed local artwork path");
 
+  gb::scrape::ScrapeSession session;
+  gb::scrape::ScrapeProgress progress;
+  config.provider = "libretro";
+  config.overwrite_artwork = false;
+  Expect(session.Begin(db, config, progress), "prepare missing-art scrape");
+  Expect(progress.total == 0 && progress.skipped_existing == 1 && progress.finished,
+         "scrape skips a game that already has artwork");
+
   if (failures != 0) {
     std::cerr << failures << " artwork index assertion(s) failed\n";
     return 1;

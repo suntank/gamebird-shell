@@ -25,7 +25,7 @@ This repository now includes Milestone 7 foundations:
 - `last_played` timestamp update after launched process exits
 - Background job queue in SQLite (`jobs` table + status transitions)
 - `gblibd` worker modes: `--jobs-once` and `--daemon`
-- Implemented job types: `scan`, `identify`, plus placeholder `scrape/download_art/build_thumb`
+- Implemented job types: `scan`, `identify`, `scrape`, `download_art`, and `build_thumb`
 - Local heuristic metadata provider populating `game_metadata`
 - Runtime settings persistence (`show_diagnostics`, `show_hidden_games`)
 - Interactive Settings screen with save support
@@ -39,7 +39,7 @@ This repository now includes Milestone 7 foundations:
 ## Build (Ubuntu)
 
 ```bash
-sudo apt-get install -y build-essential cmake pkg-config libsdl2-dev
+sudo apt-get install -y build-essential cmake pkg-config libsdl2-dev libpng-dev
 cmake -S . -B build -G "Unix Makefiles"
 cmake --build build -j
 ```
@@ -58,7 +58,9 @@ Controls:
 - `A` on game list: launch selected item
 - `X` / `A`: toggle favorite (in game list)
 - `Y` / `S`: toggle hidden (in game list)
-- `Start` / Enter: toggle diagnostics
+- `Start` / Enter: open or close Start Menu; on the handheld, hold physical
+  Start for about one second to show battery/volume status, then use D-pad
+  Up/Down for volume
 - `Select` / Backspace: return Home
 - `Esc`: quit
 - Settings screen: `A` toggles/saves selected option
@@ -78,11 +80,69 @@ GameBird's SPI-connected 240x240 panel, scanout is slower than the SNES refresh
 rate; keeping presentation on a video thread prevents panel transfers from
 slowing the emulation and audio run loop.
 
+While a RetroArch game is running, hold **Select** and press **Start** to exit
+back to GameBird Shell.
+
 Or pin input device explicitly:
 
 ```bash
 sudo ./build/gbshell --presenter fbdev --fbdev /dev/fb1 --input-evdev /dev/input/event2
 ```
+
+## Waveshare GamePi13 controls
+
+The handheld's twelve active-low GPIO switches are described by
+`hardware/gamepi13/gamebird-controls-overlay.dts`. The overlay uses Linux's
+in-tree `gpio-keys` driver and exposes one input device named
+`GameBird Controls`; no `mk_arcade_joystick_rpi` module or background polling
+service is required. Its BCM pin map follows the GamePi13 board specification:
+
+```text
+Up 5    Down 6    Left 16   Right 13
+A 21    B 20      X 15      Y 12
+L 23    R 14      Start 26  Select 19
+```
+
+GPIO 18 remains dedicated to PWM audio, GPIO 25/27 to display DC/reset, and
+SPI0 to the display. Install the overlay on the Pi with:
+
+```bash
+sudo ./scripts/install-gamepi13-controls.sh
+sudo reboot
+```
+
+The installer temporarily remounts the protected firmware partition writable,
+compiles and validates the overlay, enables it in `config.txt`, installs the
+matching RetroArch controller profile, syncs the changes, and restores the
+read-only firmware mount before returning.
+
+The SPI panel is a permanent appliance display rather than a desktop seat
+device. Install the matching access rule so opening and closing SSH sessions
+cannot cause logind to revoke RetroArch's access to the panel DRM device:
+
+```bash
+sudo ./scripts/install-panel-access-rule.sh
+```
+
+## Battery status (INA219)
+
+The framebuffer shell reads the existing INA219 battery monitor directly over
+I²C; no Python overlay process is required. Hold the physical `Start` button
+for about 0.85 seconds to show voltage, charge/discharge state, a battery
+gauge, and the current volume. While holding Start, use D-pad Up/Down to
+change the ALSA PCM volume in 5% steps. Releasing Start hides the held panel.
+When charging begins, the battery gauge appears briefly; at 20% or lower it is
+red, and below 5% it flashes until charging resumes. The default is the
+original monitor address `0x43` on `/dev/i2c-1`:
+
+```bash
+./build/gbshell --presenter fbdev --battery-i2c /dev/i2c-1 --battery-address 0x43
+```
+
+When the monitor or battery is disconnected, the hold panel displays `BAT N/A`
+and the launcher continues normally. It performs no automatic shutdown or
+battery-management write. Use `--battery-disabled` to turn the probe off
+entirely.
 
 Run a library scan:
 
@@ -147,6 +207,36 @@ inside its 60×60 artwork panel, aspect-fit it, and keep a small RGB565 cache so
 the SPI display is not repeatedly decoding files. Missing, malformed, or very
 large images safely fall back to `NO ART`.
 
+The Systems screen is a left/right console carousel. Press `A` to enter its
+cover browser, use up/down to move through games, and use left/right to switch
+consoles without leaving the cover view. The selected game's cover fills the
+upper portion of the display, with the previous/current/next titles below it.
+Optional console artwork uses:
+
+```text
+data/system-art/<system-id>-icon.png
+data/system-art/<system-id>-logo.png
+```
+
+Both are aspect-fitted PNGs. If either file is absent, the shell draws a built-in
+console icon or the system name, so console browsing remains fully usable
+offline.
+
+### Scraping box art and metadata
+
+Open **Settings**, leave **Scraper: LIBRETRO** selected, and choose **Scrape
+Library Now**. The account-free provider searches Libretro's thumbnail catalog,
+normalizes common dump tags such as `(JU) [!]`, and downloads only confident
+matches. It also imports available release year, genre, developer, publisher,
+and player-count fields from the matching Libretro database record. Downloads
+are written to the persistent `data/artwork/<system-id>/` tree and indexed in
+the catalog. Existing artwork is preserved unless **Replace Existing Art** is
+enabled.
+
+The first pass supports SNES, NES, Game Boy, Game Boy Color, Game Boy Advance,
+Mega Drive/Genesis, Master System, Game Gear, Nintendo 64, PlayStation, and
+Atari 2600 system IDs. Unsupported systems and executable apps are skipped.
+
 To use a different artwork root from the command line:
 
 ```bash
@@ -200,6 +290,11 @@ rediscovers controllers when returning. In `auto` evdev mode, USB and Bluetooth
 gamepads are rescanned periodically, so disconnecting and reconnecting a pad no
 longer exits the shell.
 
+The built-in GamePi13 controller also has a RetroArch auto-configuration profile
+at `config/retroarch-autoconfig/linuxraw/GameBird Controls.cfg`. Install it in
+`~/.config/retroarch/autoconfig/linuxraw/` on the handheld so RetroArch recognizes
+the pad and does not fall back to an unconfigured-device warning.
+
 Run the automated tests with `ctest --test-dir build --output-on-failure`. On a
 Linux device with `/dev/uinput`, the unplug/replug path also has a root-only
 integration probe:
@@ -218,5 +313,5 @@ Milestone 7 settings and tools:
 
 ## Planned next milestones
 
-- Network scraping provider integration and image pipeline hardening
+- Additional account-backed scraping providers and manual match selection
 - Thumbnail/image cache execution path in UI

@@ -15,12 +15,14 @@
 #include <unordered_map>
 
 #include "core/logging.h"
+#include "core/battery_status.h"
 #include "core/launch_config.h"
 #include "core/settings.h"
 #include "core/retroarch_input.h"
 #include "core/time.h"
 #include "db/db.h"
 #include "platform/input_evdev.h"
+#include "platform/battery_ina219.h"
 #include "platform/platform.h"
 #include "platform/platform_fbdev.h"
 #include "platform/platform_sdl.h"
@@ -46,18 +48,33 @@ struct Args {
   std::string settings_path = "./config/user_settings.json";
   std::string diagnostics_dir = "./data";
   std::string artwork_dir;
+  std::string battery_i2c = "/dev/i2c-1";
+  std::uint8_t battery_address = 0x43;
+  bool battery_disabled = false;
   std::string fbdev = "/dev/fb1";
   std::string input_evdev = "auto";
+  bool tv_mode = false;
   int scale = 3;
 };
 
-constexpr std::array<gb::platform::Button, 12> kButtonOrder = {
+constexpr std::array<gb::platform::Button, 25> kButtonOrder = {
     gb::platform::Button::Up,     gb::platform::Button::Down,
     gb::platform::Button::Left,   gb::platform::Button::Right,
     gb::platform::Button::A,      gb::platform::Button::B,
     gb::platform::Button::X,      gb::platform::Button::Y,
     gb::platform::Button::L,      gb::platform::Button::R,
+    gb::platform::Button::L2,     gb::platform::Button::R2,
+    gb::platform::Button::L3,     gb::platform::Button::R3,
     gb::platform::Button::Start,  gb::platform::Button::Select,
+    gb::platform::Button::Guide,
+    gb::platform::Button::LeftStickUp,
+    gb::platform::Button::LeftStickDown,
+    gb::platform::Button::LeftStickLeft,
+    gb::platform::Button::LeftStickRight,
+    gb::platform::Button::RightStickUp,
+    gb::platform::Button::RightStickDown,
+    gb::platform::Button::RightStickLeft,
+    gb::platform::Button::RightStickRight,
 };
 
 constexpr std::size_t kButtonCount = kButtonOrder.size();
@@ -93,10 +110,36 @@ const char* ButtonName(const gb::platform::Button button) {
       return "L";
     case gb::platform::Button::R:
       return "R";
+    case gb::platform::Button::L2:
+      return "L2";
+    case gb::platform::Button::R2:
+      return "R2";
+    case gb::platform::Button::L3:
+      return "L3";
+    case gb::platform::Button::R3:
+      return "R3";
     case gb::platform::Button::Start:
       return "Start";
     case gb::platform::Button::Select:
       return "Select";
+    case gb::platform::Button::Guide:
+      return "Guide";
+    case gb::platform::Button::LeftStickUp:
+      return "L-Up";
+    case gb::platform::Button::LeftStickDown:
+      return "L-Down";
+    case gb::platform::Button::LeftStickLeft:
+      return "L-Left";
+    case gb::platform::Button::LeftStickRight:
+      return "L-Right";
+    case gb::platform::Button::RightStickUp:
+      return "R-Up";
+    case gb::platform::Button::RightStickDown:
+      return "R-Down";
+    case gb::platform::Button::RightStickLeft:
+      return "R-Left";
+    case gb::platform::Button::RightStickRight:
+      return "R-Right";
   }
   return "A";
 }
@@ -253,6 +296,22 @@ enum class BluetoothModalType {
   ConfirmDisconnectAll,
 };
 
+struct WifiNetwork {
+  std::string ssid;
+  int signal = 0;
+  bool secured = false;
+  bool active = false;
+};
+
+enum class PendingWifiAction {
+  None,
+  RefreshStatus,
+  Scan,
+  Connect,
+  Disconnect,
+  SetCountry,
+};
+
 enum class GameListView {
   System,
   Recent,
@@ -268,14 +327,36 @@ struct LibraryState {
   std::vector<gb::db::SystemSummary> systems;
   std::vector<gb::db::GameSummary> games;
   std::vector<gb::db::LibraryRootState> library_roots;
+  std::string system_artwork_dir;
   GameListView game_list_view = GameListView::System;
   gb::db::GameDetails details;
   bool details_ready = false;
+  bool battery_start_held = false;
+  bool battery_start_chord_used = false;
+  bool battery_hud_visible = false;
+  std::uint64_t battery_hold_started_ms = 0;
+  std::uint64_t battery_last_read_ms = 0;
+  std::uint64_t battery_auto_hud_until_ms = 0;
+  std::uint64_t battery_last_flash_ms = 0;
+  bool battery_sample_seen = false;
+  gb::core::BatteryStatus battery_status;
+  std::string battery_error;
+  int volume_percent = -1;
+  std::uint64_t volume_last_read_ms = 0;
+  std::uint64_t volume_last_adjust_ms = 0;
+  std::string volume_error;
+  bool tv_mode = false;
+  bool tv_external_controller = false;
+  std::uint64_t tv_mode_notice_until_ms = 0;
 
   int system_selected = 0;
   int game_selected = 0;
   int settings_selected = 0;
   int tools_selected = 0;
+
+  bool scrape_active = false;
+  gb::scrape::ScrapeSession scrape_session;
+  gb::scrape::ScrapeProgress scrape_progress;
 
   int pending_launch_game_id = 0;
   bool pending_launch_retroarch_menu = false;
@@ -348,6 +429,19 @@ struct LibraryState {
   BluetoothModalType bluetooth_modal = BluetoothModalType::None;
   std::string bluetooth_modal_address;
   std::string bluetooth_modal_name;
+
+  gb::ui::screens::WifiView wifi_view = gb::ui::screens::WifiView::Overview;
+  int wifi_selected = 0;
+  int wifi_keyboard_page = 0;
+  std::vector<WifiNetwork> wifi_networks;
+  std::string wifi_connected_ssid;
+  int wifi_connected_signal = 0;
+  bool wifi_enabled = true;
+  std::string wifi_country;
+  std::string wifi_selected_ssid;
+  std::string wifi_password;
+  std::string wifi_country_entry;
+  PendingWifiAction pending_wifi_action = PendingWifiAction::None;
 };
 
 std::string DefaultGblaunchPath(const char* argv0) {
@@ -397,8 +491,27 @@ Args ParseArgs(const int argc, char** argv) {
       out.artwork_dir = argv[++i];
       continue;
     }
+    if (arg == "--battery-i2c" && i + 1 < argc) {
+      out.battery_i2c = argv[++i];
+      continue;
+    }
+    if (arg == "--battery-address" && i + 1 < argc) {
+      const auto parsed = std::strtoul(argv[++i], nullptr, 0);
+      if (parsed <= 0x7F) {
+        out.battery_address = static_cast<std::uint8_t>(parsed);
+      }
+      continue;
+    }
+    if (arg == "--battery-disabled") {
+      out.battery_disabled = true;
+      continue;
+    }
     if (arg == "--fbdev" && i + 1 < argc) {
       out.fbdev = argv[++i];
+      continue;
+    }
+    if (arg == "--tv-mode") {
+      out.tv_mode = true;
       continue;
     }
     if (arg == "--input-evdev" && i + 1 < argc) {
@@ -477,8 +590,8 @@ std::vector<InputProfile> ParseInputProfiles(const std::string& encoded) {
             (right.rfind("key:", 0) == 0 || right.rfind("btn:", 0) == 0 ||
              right.rfind("axis:", 0) == 0)) {
           profile.retroarch_bindings[ButtonIndex(target)] = right;
+          continue;
         }
-        continue;
       }
       if (left.size() > 1 && (left[0] == 'K' || left[0] == 'k')) {
         try {
@@ -800,7 +913,18 @@ constexpr std::array<gb::platform::Button, kButtonCount> kRemapCaptureOrder = {
     gb::platform::Button::A,      gb::platform::Button::B,
     gb::platform::Button::X,      gb::platform::Button::Y,
     gb::platform::Button::L,      gb::platform::Button::R,
+    gb::platform::Button::L2,     gb::platform::Button::R2,
+    gb::platform::Button::L3,     gb::platform::Button::R3,
     gb::platform::Button::Start,  gb::platform::Button::Select,
+    gb::platform::Button::Guide,
+    gb::platform::Button::LeftStickUp,
+    gb::platform::Button::LeftStickDown,
+    gb::platform::Button::LeftStickLeft,
+    gb::platform::Button::LeftStickRight,
+    gb::platform::Button::RightStickUp,
+    gb::platform::Button::RightStickDown,
+    gb::platform::Button::RightStickLeft,
+    gb::platform::Button::RightStickRight,
 };
 
 constexpr std::uint64_t kRemapArmDelayMs = 250;
@@ -820,6 +944,12 @@ void ClampSelection(int& selected, const int count) {
 }
 
 void LoadSystems(gb::db::Database& db, LibraryState& lib) {
+  std::string selected_system_id;
+  if (lib.system_selected >= 0 &&
+      lib.system_selected < static_cast<int>(lib.systems.size())) {
+    selected_system_id = lib.systems[static_cast<std::size_t>(lib.system_selected)].id;
+  }
+
   if (!lib.db_ready) {
     lib.systems.clear();
     return;
@@ -830,11 +960,41 @@ void LoadSystems(gb::db::Database& db, LibraryState& lib) {
     return;
   }
 
+  // Apps are the console's own software library. Present it as GAMEBIRD even
+  // for databases created before the system configuration was renamed.
+  for (auto& system : lib.systems) {
+    if (system.id == "apps") {
+      system.name = "GAMEBIRD";
+      break;
+    }
+  }
+
   if (!db.ListLibraryRoots(lib.library_roots)) {
     lib.status = "DB ROOT READ ERROR";
   }
 
+  if (!selected_system_id.empty()) {
+    const auto selected = std::find_if(
+        lib.systems.begin(), lib.systems.end(),
+        [&selected_system_id](const gb::db::SystemSummary& system) {
+          return system.id == selected_system_id;
+        });
+    if (selected != lib.systems.end()) {
+      lib.system_selected =
+          static_cast<int>(std::distance(lib.systems.begin(), selected));
+    }
+  }
   ClampSelection(lib.system_selected, static_cast<int>(lib.systems.size()));
+}
+
+void SelectGameBirdSystem(LibraryState& lib) {
+  const auto gamebird = std::find_if(
+      lib.systems.begin(), lib.systems.end(),
+      [](const gb::db::SystemSummary& system) { return system.id == "apps"; });
+  if (gamebird != lib.systems.end()) {
+    lib.system_selected =
+        static_cast<int>(std::distance(lib.systems.begin(), gamebird));
+  }
 }
 
 void LoadGamesForCurrentSystem(gb::db::Database& db, LibraryState& lib) {
@@ -894,6 +1054,20 @@ void ReloadGameList(gb::db::Database& db, LibraryState& lib) {
   }
 }
 
+void RefreshSelectedGameDetails(gb::db::Database& db, LibraryState& lib) {
+  lib.details_ready = false;
+  lib.details = gb::db::GameDetails{};
+  if (lib.games.empty()) {
+    return;
+  }
+  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
+  if (!db.GetGameDetails(lib.games[lib.game_selected].id, lib.details)) {
+    lib.status = "DETAILS LOAD FAILED";
+    return;
+  }
+  lib.details_ready = true;
+}
+
 std::string GameListTitle(const LibraryState& lib) {
   switch (lib.game_list_view) {
     case GameListView::Recent:
@@ -912,15 +1086,29 @@ void OpenSelectedGameDetails(gb::db::Database& db,
   if (lib.games.empty()) {
     return;
   }
-  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
-  if (!db.GetGameDetails(lib.games[lib.game_selected].id, lib.details)) {
-    lib.details_ready = false;
-    lib.status = "DETAILS LOAD FAILED";
+  RefreshSelectedGameDetails(db, lib);
+  if (!lib.details_ready) {
     return;
   }
-  lib.details_ready = true;
   ui.screen = gb::ui::Screen::Details;
   ui.needs_redraw = true;
+}
+
+void SelectSystem(gb::db::Database& db,
+                  LibraryState& lib,
+                  const int selection) {
+  if (lib.systems.empty()) {
+    return;
+  }
+  const int count = static_cast<int>(lib.systems.size());
+  lib.system_selected = (selection % count + count) % count;
+  const auto& system = lib.systems[static_cast<std::size_t>(lib.system_selected)];
+  lib.current_system_id = system.id;
+  lib.current_system_name = system.name;
+  lib.game_list_view = GameListView::System;
+  lib.game_selected = 0;
+  LoadGamesForCurrentSystem(db, lib);
+  RefreshSelectedGameDetails(db, lib);
 }
 
 void OpenSystem(gb::db::Database& db, gb::ui::UIState& ui, LibraryState& lib) {
@@ -929,21 +1117,24 @@ void OpenSystem(gb::db::Database& db, gb::ui::UIState& ui, LibraryState& lib) {
   }
 
   ClampSelection(lib.system_selected, static_cast<int>(lib.systems.size()));
-  lib.current_system_id = lib.systems[lib.system_selected].id;
-  lib.current_system_name = lib.systems[lib.system_selected].name;
-  lib.game_list_view = GameListView::System;
-  lib.game_selected = 0;
-  LoadGamesForCurrentSystem(db, lib);
+  SelectSystem(db, lib, lib.system_selected);
   ui.screen = gb::ui::Screen::GameList;
   ui.needs_redraw = true;
 }
 
-std::vector<std::string> BuildSystemRows(const LibraryState& lib) {
-  std::vector<std::string> out;
+std::vector<gb::ui::screens::SystemCarouselItem> BuildSystemCards(
+    const LibraryState& lib) {
+  std::vector<gb::ui::screens::SystemCarouselItem> out;
   out.reserve(lib.systems.size());
 
   for (const auto& sys : lib.systems) {
-    out.push_back(sys.name + " - " + std::to_string(sys.game_count));
+    const auto art_dir = std::filesystem::path(lib.system_artwork_dir);
+    out.push_back(gb::ui::screens::SystemCarouselItem{
+        .name = sys.name,
+        .game_count = sys.game_count,
+        .icon_path = (art_dir / (sys.id + "-icon.png")).string(),
+        .logo_path = (art_dir / (sys.id + "-logo.png")).string(),
+    });
   }
 
   return out;
@@ -963,12 +1154,42 @@ std::vector<std::string> BuildGameRows(const LibraryState& lib) {
   return out;
 }
 
+std::vector<std::string> BuildGameBrowserTitles(const LibraryState& lib) {
+  std::vector<std::string> out;
+  out.reserve(lib.games.size());
+  for (const auto& game : lib.games) {
+    out.push_back(game.title);
+  }
+  return out;
+}
+
+std::string LibraryUiSignature(const LibraryState& lib) {
+  std::string signature;
+  for (const auto& system : lib.systems) {
+    signature += system.id;
+    signature += ':';
+    signature += std::to_string(system.game_count);
+    signature += ';';
+  }
+  signature += '|';
+  for (const auto& game : lib.games) {
+    signature += std::to_string(game.id);
+    signature += ':';
+    signature += game.title;
+    signature += ';';
+  }
+  return signature;
+}
+
 std::vector<std::string> BuildSettingsRows(const LibraryState& lib) {
   return {
       std::string("Diagnostics Overlay: ") +
           (lib.settings.show_diagnostics ? "ON" : "OFF"),
       std::string("Show Hidden Games: ") +
           (lib.settings.show_hidden_games ? "ON" : "OFF"),
+      std::string("Scraper: ") +
+          (lib.settings.scrape_provider == "none" ? "OFF" : "LIBRETRO"),
+      "Scrape Missing Artwork",
       "Input Setup",
       "Save Settings",
   };
@@ -992,6 +1213,7 @@ std::vector<std::string> BuildToolsRows(const LibraryState& lib) {
       "Run Queued Jobs",
       "Export Diagnostics",
       "Input Setup",
+      "Wi-Fi",
       std::string("Bluetooth Pads: ") +
           (lib.settings.enable_bluetooth_gamepads ? "AUTO" : "OFF"),
       "RetroArch Menu",
@@ -1001,7 +1223,30 @@ std::vector<std::string> BuildToolsRows(const LibraryState& lib) {
 }
 
 std::string RetroArchControlName(const gb::platform::Button button) {
-  return ToLower(ButtonName(button));
+  switch (button) {
+    case gb::platform::Button::LeftStickUp:
+      return "l_y_minus";
+    case gb::platform::Button::LeftStickDown:
+      return "l_y_plus";
+    case gb::platform::Button::LeftStickLeft:
+      return "l_x_minus";
+    case gb::platform::Button::LeftStickRight:
+      return "l_x_plus";
+    case gb::platform::Button::RightStickUp:
+      return "r_y_minus";
+    case gb::platform::Button::RightStickDown:
+      return "r_y_plus";
+    case gb::platform::Button::RightStickLeft:
+      return "r_x_minus";
+    case gb::platform::Button::RightStickRight:
+      return "r_x_plus";
+    case gb::platform::Button::Guide:
+      // Guide is a shell-level control. RetroArch has no per-player RetroPad
+      // guide field; users can map it to a regular target in the wizard.
+      return {};
+    default:
+      return ToLower(ButtonName(button));
+  }
 }
 
 std::string RetroArchInputConfigPath(const Args& args) {
@@ -1012,40 +1257,173 @@ std::string RetroArchInputConfigPath(const Args& args) {
   return (parent / "retroarch-input-gamebird.cfg").string();
 }
 
+std::string RetroArchActiveInputConfigPath() {
+  // tv-mode-manager.sh creates this volatile config before gbshell starts.
+  // It is the saved GamePi13 mapping in handheld mode and a clean external-pad
+  // config in TV mode, so a disconnected HAT can never pin player one.
+  return "/run/gamebird-retroarch-input.cfg";
+}
+
+bool WriteRuntimeTextFile(const std::string& path,
+                          const std::string& contents,
+                          std::string& error) {
+  error.clear();
+  // The TV-mode manager creates this /run file and gives it to the gamebird
+  // user. The /run directory itself remains root-owned, so gbshell can replace
+  // the contents but cannot create and rename a sibling temporary file.
+  // HDMI transitions restart gbshell before another launch, keeping this
+  // direct write isolated from the manager's atomic mode switch.
+  std::ofstream out(path, std::ios::trunc);
+  if (!out) {
+    error = "failed to open runtime config: " + path;
+    return false;
+  }
+  out << contents;
+  out.close();
+  if (!out) {
+    error = "failed to write runtime config: " + path;
+    return false;
+  }
+  return true;
+}
+
+bool WriteBatteryOverlayConfig(const LibraryState& lib, std::string& error) {
+  std::string image_name = "battery-na.png";
+  if (lib.battery_status.available) {
+    // The artwork is generated in 5% increments. Pick the nearest image from
+    // the real INA219 reading once per launch; it must never change merely
+    // because Start was pressed or released.
+    const int rounded = std::clamp(
+        ((lib.battery_status.percent + 2) / 5) * 5, 0, 100);
+    image_name = "battery-" + std::to_string(rounded) + ".png";
+  }
+
+  const std::string image =
+      "/home/gamebird/gamebird-shell/config/retroarch-overlays/battery/" + image_name;
+  std::ostringstream config;
+  config << "overlays = 2\n\n"
+         << "overlay0_name = \"hidden\"\n"
+         << "overlay0_full_screen = true\n"
+         << "overlay0_descs = 0\n\n"
+         << "overlay1_name = \"battery\"\n"
+         << "overlay1_overlay = \"" << image << "\"\n"
+         << "overlay1_full_screen = true\n"
+         << "overlay1_descs = 0\n";
+  return WriteRuntimeTextFile("/tmp/gamebird-battery-overlay.cfg", config.str(),
+                              error);
+}
+
+bool IsSameInputDevice(const gb::platform::EvdevDeviceInfo& device,
+                       const std::string& name,
+                       const std::uint16_t bus_type,
+                       const std::uint16_t vendor,
+                       const std::uint16_t product) {
+  if (vendor != 0 && product != 0) {
+    return device.vendor == vendor && device.product == product &&
+           (bus_type == 0 || device.bus_type == bus_type);
+  }
+  return !name.empty() && device.name == name;
+}
+
 bool WriteActiveRetroArchInputConfig(const Args& args,
                                      const LibraryState& lib,
-                                     std::string& error) {
-  int profile_idx = FindBestProfileIndex(
-      lib.input_profiles, lib.last_input_device, lib.last_input_bus_type,
-      lib.last_input_vendor, lib.last_input_product);
-  if (profile_idx < 0 && lib.input_profiles.size() == 1) {
-    profile_idx = 0;
+                                     std::string& error,
+                                     const bool persist_saved_profile = false) {
+  std::vector<const gb::platform::EvdevDeviceInfo*> active_devices;
+  for (const auto& device : lib.input_devices) {
+    if (!device.is_gamepad || device.joypad_index < 0 ||
+        (lib.tv_mode && device.name == "GameBird Controls") ||
+        (!lib.settings.enable_bluetooth_gamepads && device.is_bluetooth)) {
+      continue;
+    }
+    active_devices.push_back(&device);
+  }
+  std::sort(active_devices.begin(), active_devices.end(), [](const auto* a,
+                                                              const auto* b) {
+    return a->joypad_index < b->joypad_index;
+  });
+
+  auto move_to_front = [&](const auto& predicate) {
+    const auto it = std::find_if(active_devices.begin(), active_devices.end(),
+                                 predicate);
+    if (it != active_devices.end()) {
+      std::rotate(active_devices.begin(), it, it + 1);
+      return true;
+    }
+    return false;
+  };
+
+  bool primary_selected = false;
+  if (!lib.tv_mode) {
+    primary_selected = move_to_front([](const auto* device) {
+      return device->name == "GameBird Controls";
+    });
+  }
+  if (!primary_selected) {
+    primary_selected = move_to_front([&](const auto* device) {
+      return IsSameInputDevice(*device, lib.last_input_device,
+                               lib.last_input_bus_type, lib.last_input_vendor,
+                               lib.last_input_product);
+    });
+  }
+  if (!primary_selected && !lib.settings.preferred_input_device.empty()) {
+    move_to_front([&](const auto* device) {
+      return device->name == lib.settings.preferred_input_device;
+    });
+  }
+
+  std::vector<int> active_indices;
+  active_indices.reserve(active_devices.size());
+  for (const auto* device : active_devices) {
+    active_indices.push_back(device->joypad_index);
   }
 
   std::vector<std::pair<std::string, std::string>> bindings;
-  std::string device_name = lib.last_input_device;
-  int joypad_index = lib.last_input_joypad_index;
+  std::string device_name;
+  int profile_idx = -1;
+  if (!active_devices.empty()) {
+    const auto& primary = *active_devices.front();
+    device_name = primary.name;
+    profile_idx = FindBestProfileIndex(lib.input_profiles, primary.name,
+                                       primary.bus_type, primary.vendor,
+                                       primary.product);
+  }
   if (profile_idx >= 0) {
     const auto& profile = lib.input_profiles[static_cast<std::size_t>(profile_idx)];
-    device_name = profile.device_match;
     for (std::size_t i = 0; i < kButtonCount; ++i) {
       if (!profile.retroarch_bindings[i].empty()) {
-        bindings.emplace_back(RetroArchControlName(kButtonOrder[i]),
-                              profile.retroarch_bindings[i]);
-      }
-    }
-    if (joypad_index < 0) {
-      for (const auto& device : lib.input_devices) {
-        if (FindBestProfileIndex(lib.input_profiles, device.name, device.bus_type,
-                                 device.vendor, device.product) == profile_idx) {
-          joypad_index = device.joypad_index;
-          break;
+        const std::string control = RetroArchControlName(kButtonOrder[i]);
+        if (!control.empty()) {
+          bindings.emplace_back(control, profile.retroarch_bindings[i]);
         }
       }
     }
   }
-  return gb::core::WriteRetroArchInputConfig(
-      RetroArchInputConfigPath(args), device_name, bindings, joypad_index, error);
+
+  const std::string generated = gb::core::BuildRetroArchInputConfig(
+      device_name, bindings, active_indices);
+  const std::string saved_path = RetroArchInputConfigPath(args);
+  if (lib.tv_mode) {
+    const auto config_parent = std::filesystem::path(args.settings_path).parent_path();
+    const auto tv_path = config_parent / "retroarch-tv-input.cfg";
+    std::ifstream tv_input(tv_path);
+    if (!tv_input) {
+      error = "failed to read TV input config: " + tv_path.string();
+      return false;
+    }
+    std::ostringstream combined;
+    combined << tv_input.rdbuf() << '\n' << generated;
+    return WriteRuntimeTextFile(RetroArchActiveInputConfigPath(), combined.str(),
+                                error);
+  }
+
+  if (persist_saved_profile) {
+    if (!gb::core::WriteRetroArchInputConfig(saved_path, device_name, bindings,
+                                              active_indices, error)) {
+      return false;
+    }
+  }
+  return WriteRuntimeTextFile(RetroArchActiveInputConfigPath(), generated, error);
 }
 
 bool SaveInputSettings(const Args& args, LibraryState& lib, std::string& status) {
@@ -1058,7 +1436,7 @@ bool SaveInputSettings(const Args& args, LibraryState& lib, std::string& status)
     gb::core::Log(gb::core::LogLevel::Error, err);
     return false;
   }
-  if (!WriteActiveRetroArchInputConfig(args, lib, err)) {
+  if (!WriteActiveRetroArchInputConfig(args, lib, err, true)) {
     status = "RA input config failed";
     gb::core::Log(gb::core::LogLevel::Error, err);
     return false;
@@ -1635,7 +2013,8 @@ void ResetLaunchOptionsToInherited(LibraryState& lib) {
   lib.launch_options_video_selected = 0;
 }
 
-gb::scrape::WorkerConfig MakeWorkerConfig(const Args& args) {
+gb::scrape::WorkerConfig MakeWorkerConfig(const Args& args,
+                                          const LibraryState& lib) {
   gb::scrape::WorkerConfig cfg;
   cfg.defaults_json_path = args.defaults_json;
   cfg.systems_dir = args.systems_dir;
@@ -1643,6 +2022,10 @@ gb::scrape::WorkerConfig MakeWorkerConfig(const Args& args) {
                         ? (std::filesystem::path(args.db_path).parent_path() / "artwork").string()
                         : args.artwork_dir;
   cfg.hide_missing = false;
+  cfg.provider = lib.settings.scrape_provider;
+  // Batch scraping is deliberately additive. Existing user-selected artwork
+  // is never replaced by an automatic match.
+  cfg.overwrite_artwork = false;
   return cfg;
 }
 
@@ -1834,6 +2217,209 @@ void SortBluetoothDevices(std::vector<BluetoothDevice>& devices) {
 
 gb::platform::ProcessCaptureResult RunShellCapture(const std::string& command) {
   return gb::platform::RunProcessCapture({"/bin/bash", "-lc", command});
+}
+
+std::string ShellQuote(const std::string& text) {
+  std::string quoted = "'";
+  for (const char ch : text) {
+    if (ch == '\'') {
+      quoted += "'\\\"'\\\"'";
+    } else {
+      quoted += ch;
+    }
+  }
+  return quoted + "'";
+}
+
+std::vector<std::string> ParseNmcliTerse(const std::string& line) {
+  std::vector<std::string> fields;
+  std::string current;
+  bool escaped = false;
+  for (const char ch : line) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+    } else if (ch == '\\') {
+      escaped = true;
+    } else if (ch == ':') {
+      fields.push_back(current);
+      current.clear();
+    } else {
+      current += ch;
+    }
+  }
+  if (escaped) current += '\\';
+  fields.push_back(current);
+  return fields;
+}
+
+bool IsValidWifiCountry(const std::string& country) {
+  return country.size() == 2 &&
+         std::isalpha(static_cast<unsigned char>(country[0])) &&
+         std::isalpha(static_cast<unsigned char>(country[1]));
+}
+
+std::string WifiCountryFromRegdom(const std::string& text) {
+  const std::string lower = ToLower(text);
+  const auto marker = lower.find("country ");
+  if (marker == std::string::npos || marker + 10 > lower.size()) return {};
+  const std::string country = lower.substr(marker + 8, 2);
+  if (!IsValidWifiCountry(country) || country == "00") return {};
+  std::string out = country;
+  for (char& ch : out) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  return out;
+}
+
+bool RefreshWifiStatus(LibraryState& lib, std::string& status) {
+  const auto radio = RunShellCapture("timeout 8s sudo -n nmcli -t -f WIFI general");
+  lib.wifi_enabled = ToLower(Trim(radio.output)) == "enabled";
+
+  const auto networks = RunShellCapture(
+      "timeout 10s sudo -n nmcli -t --escape yes -f ACTIVE,SSID,SIGNAL,SECURITY "
+      "device wifi list ifname wlan0");
+  lib.wifi_connected_ssid.clear();
+  lib.wifi_connected_signal = 0;
+  if (networks.process.launched && networks.process.exit_code == 0) {
+    std::istringstream input(networks.output);
+    std::string line;
+    while (std::getline(input, line)) {
+      const auto fields = ParseNmcliTerse(line);
+      if (fields.size() < 4 || fields[0] != "yes") continue;
+      lib.wifi_connected_ssid = fields[1];
+      try { lib.wifi_connected_signal = std::clamp(std::stoi(fields[2]), 0, 100); }
+      catch (...) { lib.wifi_connected_signal = 0; }
+      break;
+    }
+  }
+  const auto regdom = RunShellCapture("timeout 5s sudo -n iw reg get");
+  lib.wifi_country = WifiCountryFromRegdom(regdom.output);
+  if (!lib.wifi_enabled) {
+    status = "Wi-Fi is off";
+  } else if (lib.wifi_connected_ssid.empty()) {
+    status = "Not connected";
+  } else {
+    status = "Connected to " + lib.wifi_connected_ssid;
+  }
+  return true;
+}
+
+bool ScanWifi(LibraryState& lib, std::string& status) {
+  RunShellCapture("timeout 8s sudo -n nmcli radio wifi on");
+  const auto rescan = RunShellCapture(
+      "timeout 18s sudo -n nmcli device wifi rescan ifname wlan0");
+  if (!rescan.process.launched || rescan.process.exit_code != 0) {
+    status = "Wi-Fi scan failed";
+    return false;
+  }
+  const auto list = RunShellCapture(
+      "timeout 10s sudo -n nmcli -t --escape yes -f SSID,SIGNAL,SECURITY,IN-USE "
+      "device wifi list ifname wlan0");
+  if (!list.process.launched || list.process.exit_code != 0) {
+    status = "Could not read Wi-Fi networks";
+    return false;
+  }
+  lib.wifi_networks.clear();
+  std::set<std::string> seen_ssids;
+  std::istringstream input(list.output);
+  std::string line;
+  while (std::getline(input, line)) {
+    const auto fields = ParseNmcliTerse(line);
+    if (fields.size() < 4 || fields[0].empty()) continue;
+    WifiNetwork network;
+    network.ssid = fields[0];
+    try { network.signal = std::clamp(std::stoi(fields[1]), 0, 100); }
+    catch (...) { network.signal = 0; }
+    network.secured = !fields[2].empty() && fields[2] != "--";
+    network.active = fields[3] == "*" || fields[3] == "yes";
+    const auto existing = std::find_if(lib.wifi_networks.begin(), lib.wifi_networks.end(),
+        [&network](const WifiNetwork& item) { return item.ssid == network.ssid; });
+    if (existing == lib.wifi_networks.end() && seen_ssids.insert(network.ssid).second) {
+      lib.wifi_networks.push_back(std::move(network));
+    }
+  }
+  std::sort(lib.wifi_networks.begin(), lib.wifi_networks.end(),
+      [](const WifiNetwork& a, const WifiNetwork& b) {
+        if (a.active != b.active) return a.active > b.active;
+        if (a.signal != b.signal) return a.signal > b.signal;
+        return ToLower(a.ssid) < ToLower(b.ssid);
+      });
+  ClampSelection(lib.wifi_selected, static_cast<int>(lib.wifi_networks.size()));
+  RefreshWifiStatus(lib, status);
+  status = std::to_string(lib.wifi_networks.size()) + " networks found";
+  return true;
+}
+
+bool ConnectWifi(LibraryState& lib, std::string& status) {
+  if (lib.wifi_selected_ssid.empty()) {
+    status = "No network selected";
+    return false;
+  }
+  std::string command = "timeout 35s sudo -n nmcli device wifi connect " +
+                        ShellQuote(lib.wifi_selected_ssid) + " ifname wlan0";
+  if (!lib.wifi_password.empty()) command += " password " + ShellQuote(lib.wifi_password);
+  const auto connected = RunShellCapture(command);
+  if (!connected.process.launched || connected.process.exit_code != 0) {
+    status = "Connection failed";
+    return false;
+  }
+  RefreshWifiStatus(lib, status);
+  status = "Connected to " + lib.wifi_selected_ssid;
+  lib.wifi_password.clear();
+  return true;
+}
+
+bool DisconnectWifi(LibraryState& lib, std::string& status) {
+  const auto disconnected = RunShellCapture(
+      "timeout 15s sudo -n nmcli device disconnect wlan0");
+  if (!disconnected.process.launched || disconnected.process.exit_code != 0) {
+    status = "Disconnect failed";
+    return false;
+  }
+  RefreshWifiStatus(lib, status);
+  status = "Wi-Fi disconnected";
+  return true;
+}
+
+bool SetWifiCountry(LibraryState& lib, std::string& status) {
+  std::string country = lib.wifi_country_entry;
+  for (char& ch : country) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  if (!IsValidWifiCountry(country)) {
+    status = "Choose a two-letter country";
+    return false;
+  }
+  const auto set = RunShellCapture("timeout 15s sudo -n raspi-config nonint do_wifi_country " +
+                                   ShellQuote(country));
+  if (!set.process.launched || set.process.exit_code != 0) {
+    status = "Could not set wireless region";
+    return false;
+  }
+  lib.wifi_country = country;
+  lib.wifi_country_entry.clear();
+  status = "Wireless region set to " + country;
+  return true;
+}
+
+bool QueueWifiAction(LibraryState& lib, const PendingWifiAction action,
+                     const std::string& status) {
+  if (lib.pending_wifi_action != PendingWifiAction::None) {
+    lib.status = "Wi-Fi busy";
+    return false;
+  }
+  lib.pending_wifi_action = action;
+  lib.status = status;
+  return true;
+}
+
+bool ExecuteWifiAction(LibraryState& lib, std::string& status) {
+  switch (lib.pending_wifi_action) {
+    case PendingWifiAction::None: return true;
+    case PendingWifiAction::RefreshStatus: return RefreshWifiStatus(lib, status);
+    case PendingWifiAction::Scan: return ScanWifi(lib, status);
+    case PendingWifiAction::Connect: return ConnectWifi(lib, status);
+    case PendingWifiAction::Disconnect: return DisconnectWifi(lib, status);
+    case PendingWifiAction::SetCountry: return SetWifiCountry(lib, status);
+  }
+  return false;
 }
 
 gb::platform::ProcessCaptureResult RunBluetoothCtl(const std::string& args,
@@ -2321,8 +2907,8 @@ void RunToolAction(const Args& args,
                    gb::db::Database& db,
                    LibraryState& lib,
                    gb::ui::UIState& ui) {
-  const auto cfg = MakeWorkerConfig(args);
-  if (lib.tools_selected != 9) {
+  const auto cfg = MakeWorkerConfig(args, lib);
+  if (lib.tools_selected != 10) {
     lib.tools_exit_confirm = false;
   }
 
@@ -2365,6 +2951,17 @@ void RunToolAction(const Args& args,
       break;
 
     case 6:
+      ui.screen = gb::ui::Screen::Wifi;
+      lib.wifi_view = gb::ui::screens::WifiView::Overview;
+      lib.wifi_selected = 0;
+      lib.wifi_networks.clear();
+      lib.wifi_password.clear();
+      lib.wifi_country_entry.clear();
+      QueueWifiAction(lib, PendingWifiAction::RefreshStatus,
+                      "Checking Wi-Fi...");
+      break;
+
+    case 7:
       lib.settings.enable_bluetooth_gamepads =
           !lib.settings.enable_bluetooth_gamepads;
       lib.status = lib.settings.enable_bluetooth_gamepads
@@ -2377,7 +2974,7 @@ void RunToolAction(const Args& args,
       }
       break;
 
-    case 7:
+    case 8:
       if (!lib.pending_launch_retroarch_menu && lib.pending_launch_game_id == 0) {
         lib.pending_launch_retroarch_menu = true;
         lib.status = "LAUNCHING RETROARCH...";
@@ -2386,7 +2983,7 @@ void RunToolAction(const Args& args,
       }
       break;
 
-    case 8:
+    case 9:
       ui.screen = gb::ui::Screen::Bluetooth;
       lib.bluetooth_show_paired = false;
       lib.bluetooth_scanned_selected = 0;
@@ -2398,7 +2995,7 @@ void RunToolAction(const Args& args,
                            "Refreshing Bluetooth...");
       break;
 
-    case 9:
+    case 10:
       if (!lib.tools_exit_confirm) {
         lib.tools_exit_confirm = true;
         lib.status = "Exit to console? A=yes B=no";
@@ -2449,9 +3046,44 @@ void HandleButton(gb::platform::Button button,
     return;
   }
 
+  if (ui.screen == gb::ui::Screen::ScrapeProgress) {
+    if (button == gb::platform::Button::B) {
+      if (lib.scrape_active) {
+        const int remaining = std::max(0, lib.scrape_progress.total -
+                                              lib.scrape_progress.completed);
+        lib.scrape_active = false;
+        lib.status = "Scrape cancelled; " + std::to_string(remaining) + " remaining";
+      }
+      ui.screen = gb::ui::Screen::Settings;
+      ui.needs_redraw = true;
+    } else if (button == gb::platform::Button::A && !lib.scrape_active) {
+      ui.screen = gb::ui::Screen::Settings;
+      ui.needs_redraw = true;
+    }
+    return;
+  }
+
+  // Start owns the global shell menu. A short press switches between the
+  // system carousel and the Start menu; a held press is handled separately
+  // by the battery HUD code in the input loop.
+  if (button == gb::platform::Button::Start) {
+    lib.tools_exit_confirm = false;
+    if (ui.screen == gb::ui::Screen::Home) {
+      LoadSystems(db, lib);
+      lib.status.clear();
+      ui.screen = gb::ui::Screen::Systems;
+    } else {
+      ui.screen = gb::ui::Screen::Home;
+    }
+    ui.needs_redraw = true;
+    return;
+  }
+
   if (button == gb::platform::Button::Select) {
     lib.tools_exit_confirm = false;
-    ui.screen = gb::ui::Screen::Home;
+    LoadSystems(db, lib);
+    lib.status.clear();
+    ui.screen = gb::ui::Screen::Systems;
     ui.needs_redraw = true;
     return;
   }
@@ -2469,11 +3101,7 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       if (button == gb::platform::Button::A) {
-        if (ui.home_selected == 2) {
-          LoadSystems(db, lib);
-          lib.status.clear();
-          ui.screen = gb::ui::Screen::Systems;
-        } else if (ui.home_selected == 0) {
+        if (ui.home_selected == 0) {
           lib.game_list_view = GameListView::Recent;
           lib.game_selected = 0;
           LoadRecentGames(db, lib);
@@ -2485,24 +3113,31 @@ void HandleButton(gb::platform::Button button,
           LoadFavoriteGames(db, lib);
           lib.status.clear();
           ui.screen = gb::ui::Screen::GameList;
-        } else if (ui.home_selected == 3) {
+        } else if (ui.home_selected == 2) {
           lib.tools_exit_confirm = false;
           ui.screen = gb::ui::Screen::Tools;
-        } else if (ui.home_selected == 4) {
+        } else if (ui.home_selected == 3) {
           ui.screen = gb::ui::Screen::Settings;
+        } else if (ui.home_selected == 4) {
+          LoadSystems(db, lib);
+          lib.status.clear();
+          ui.screen = gb::ui::Screen::Systems;
         }
         ui.needs_redraw = true;
         return;
       }
       if (button == gb::platform::Button::B) {
-        lib.status = "Use Tools -> Exit To Console";
+        LoadSystems(db, lib);
+        lib.status.clear();
+        ui.screen = gb::ui::Screen::Systems;
         ui.needs_redraw = true;
         return;
       }
       break;
 
     case gb::ui::Screen::Systems:
-      if (button == gb::platform::Button::Up) {
+      if (button == gb::platform::Button::Up ||
+          button == gb::platform::Button::Left) {
         if (!lib.systems.empty()) {
           lib.system_selected =
               (lib.system_selected + static_cast<int>(lib.systems.size()) - 1) %
@@ -2511,7 +3146,8 @@ void HandleButton(gb::platform::Button button,
         }
         return;
       }
-      if (button == gb::platform::Button::Down) {
+      if (button == gb::platform::Button::Down ||
+          button == gb::platform::Button::Right) {
         if (!lib.systems.empty()) {
           lib.system_selected =
               (lib.system_selected + 1) % static_cast<int>(lib.systems.size());
@@ -2528,7 +3164,7 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       if (button == gb::platform::Button::B) {
-        ui.screen = gb::ui::Screen::Home;
+        lib.status = "PRESS START FOR MENU";
         ui.needs_redraw = true;
         return;
       }
@@ -2540,6 +3176,9 @@ void HandleButton(gb::platform::Button button,
           lib.game_selected =
               (lib.game_selected + static_cast<int>(lib.games.size()) - 1) %
               static_cast<int>(lib.games.size());
+          if (lib.game_list_view == GameListView::System) {
+            RefreshSelectedGameDetails(db, lib);
+          }
           ui.needs_redraw = true;
         }
         return;
@@ -2548,8 +3187,21 @@ void HandleButton(gb::platform::Button button,
         if (!lib.games.empty()) {
           lib.game_selected =
               (lib.game_selected + 1) % static_cast<int>(lib.games.size());
+          if (lib.game_list_view == GameListView::System) {
+            RefreshSelectedGameDetails(db, lib);
+          }
           ui.needs_redraw = true;
         }
+        return;
+      }
+      if (lib.game_list_view == GameListView::System &&
+          (button == gb::platform::Button::Left ||
+           button == gb::platform::Button::Right)) {
+        SelectSystem(db, lib,
+                     lib.system_selected +
+                         (button == gb::platform::Button::Left ? -1 : 1));
+        lib.status.clear();
+        ui.needs_redraw = true;
         return;
       }
       if (button == gb::platform::Button::A) {
@@ -2570,6 +3222,9 @@ void HandleButton(gb::platform::Button button,
             lib.status = now_favorite ? "FAVORITE ON" : "FAVORITE OFF";
             ReloadGameList(db, lib);
             LoadSystems(db, lib);
+            if (lib.game_list_view == GameListView::System) {
+              RefreshSelectedGameDetails(db, lib);
+            }
           } else {
             lib.status = "FAVORITE TOGGLE FAILED";
           }
@@ -2578,22 +3233,6 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       if (button == gb::platform::Button::Y) {
-        if (!lib.games.empty()) {
-          ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
-          const auto game_id = lib.games[lib.game_selected].id;
-          bool now_hidden = false;
-          if (db.ToggleGameHidden(game_id, now_hidden)) {
-            lib.status = now_hidden ? "HIDDEN" : "UNHIDDEN";
-            ReloadGameList(db, lib);
-            LoadSystems(db, lib);
-          } else {
-            lib.status = "HIDE TOGGLE FAILED";
-          }
-          ui.needs_redraw = true;
-        }
-        return;
-      }
-      if (button == gb::platform::Button::Start) {
         OpenLaunchOptionsForGame(db, ui, lib);
         return;
       }
@@ -2615,12 +3254,12 @@ void HandleButton(gb::platform::Button button,
 
     case gb::ui::Screen::Settings:
       if (button == gb::platform::Button::Up) {
-        lib.settings_selected = (lib.settings_selected + 3) % 4;
+        lib.settings_selected = (lib.settings_selected + 5) % 6;
         ui.needs_redraw = true;
         return;
       }
       if (button == gb::platform::Button::Down) {
-        lib.settings_selected = (lib.settings_selected + 1) % 4;
+        lib.settings_selected = (lib.settings_selected + 1) % 6;
         ui.needs_redraw = true;
         return;
       }
@@ -2634,6 +3273,27 @@ void HandleButton(gb::platform::Button button,
           ReloadGameList(db, lib);
           lib.status = lib.settings.show_hidden_games ? "hidden visible" : "hidden hidden";
         } else if (lib.settings_selected == 2) {
+          lib.settings.scrape_provider =
+              lib.settings.scrape_provider == "none" ? "libretro" : "none";
+          lib.status = lib.settings.scrape_provider == "none"
+                           ? "scraper disabled"
+                           : "Libretro scraper selected";
+        } else if (lib.settings_selected == 3) {
+          if (lib.settings.scrape_provider == "none") {
+            lib.status = "select a scraper first";
+          } else {
+            const auto cfg = MakeWorkerConfig(args, lib);
+            if (lib.scrape_session.Begin(db, cfg, lib.scrape_progress)) {
+              lib.scrape_active = !lib.scrape_progress.finished;
+              lib.status = lib.scrape_progress.finished
+                               ? "All present games already have art"
+                               : "Preparing scrape...";
+              ui.screen = gb::ui::Screen::ScrapeProgress;
+            } else {
+              lib.status = "scrape setup failed: " + lib.scrape_progress.last_error;
+            }
+          }
+        } else if (lib.settings_selected == 4) {
           ui.screen = gb::ui::Screen::InputSetup;
           lib.status = "Input setup";
         } else {
@@ -2651,6 +3311,10 @@ void HandleButton(gb::platform::Button button,
       }
       break;
 
+    case gb::ui::Screen::ScrapeProgress:
+      // Handled before the global navigation shortcuts above.
+      return;
+
     case gb::ui::Screen::Tools:
       if (lib.tools_exit_confirm) {
         if (button == gb::platform::Button::A) {
@@ -2666,13 +3330,13 @@ void HandleButton(gb::platform::Button button,
       }
       if (button == gb::platform::Button::Up) {
         lib.tools_exit_confirm = false;
-        lib.tools_selected = (lib.tools_selected + 9) % 10;
+        lib.tools_selected = (lib.tools_selected + 10) % 11;
         ui.needs_redraw = true;
         return;
       }
       if (button == gb::platform::Button::Down) {
         lib.tools_exit_confirm = false;
-        lib.tools_selected = (lib.tools_selected + 1) % 10;
+        lib.tools_selected = (lib.tools_selected + 1) % 11;
         ui.needs_redraw = true;
         return;
       }
@@ -2752,6 +3416,170 @@ void HandleButton(gb::platform::Button button,
         ui.needs_redraw = true;
       }
       return;
+
+    case gb::ui::Screen::Wifi: {
+      using WifiView = gb::ui::screens::WifiView;
+      if (lib.wifi_view == WifiView::Overview) {
+        if (button == gb::platform::Button::Up) {
+          lib.wifi_selected = (lib.wifi_selected + 2) % 3;
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::Down) {
+          lib.wifi_selected = (lib.wifi_selected + 1) % 3;
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::A) {
+          if (lib.wifi_selected == 0) {
+            lib.wifi_view = WifiView::Networks;
+            lib.wifi_selected = 0;
+            QueueWifiAction(lib, PendingWifiAction::Scan, "Scanning nearby Wi-Fi...");
+          } else if (lib.wifi_selected == 1) {
+            if (lib.wifi_connected_ssid.empty()) {
+              lib.status = "No Wi-Fi connection";
+            } else {
+              QueueWifiAction(lib, PendingWifiAction::Disconnect, "Disconnecting Wi-Fi...");
+            }
+          } else {
+            lib.wifi_view = WifiView::Country;
+            lib.wifi_selected = 0;
+            lib.wifi_country_entry.clear();
+            lib.status.clear();
+          }
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::B) {
+          ui.screen = gb::ui::Screen::Tools;
+          ui.needs_redraw = true;
+          return;
+        }
+        break;
+      }
+      if (lib.wifi_view == WifiView::Networks) {
+        if (button == gb::platform::Button::Up && !lib.wifi_networks.empty()) {
+          lib.wifi_selected = (lib.wifi_selected +
+                               static_cast<int>(lib.wifi_networks.size()) - 1) %
+                              static_cast<int>(lib.wifi_networks.size());
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::Down && !lib.wifi_networks.empty()) {
+          lib.wifi_selected = (lib.wifi_selected + 1) %
+                              static_cast<int>(lib.wifi_networks.size());
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::X) {
+          QueueWifiAction(lib, PendingWifiAction::Scan, "Scanning nearby Wi-Fi...");
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::A && !lib.wifi_networks.empty()) {
+          ClampSelection(lib.wifi_selected, static_cast<int>(lib.wifi_networks.size()));
+          const auto& network =
+              lib.wifi_networks[static_cast<std::size_t>(lib.wifi_selected)];
+          lib.wifi_selected_ssid = network.ssid;
+          lib.wifi_password.clear();
+          if (network.secured && !network.active) {
+            lib.wifi_view = WifiView::Password;
+            lib.wifi_selected = 0;
+            lib.wifi_keyboard_page = 0;
+            lib.status.clear();
+          } else {
+            QueueWifiAction(lib, PendingWifiAction::Connect,
+                            "Connecting to " + network.ssid + "...");
+          }
+          ui.needs_redraw = true;
+          return;
+        }
+        if (button == gb::platform::Button::B) {
+          lib.wifi_view = WifiView::Overview;
+          lib.wifi_selected = 0;
+          QueueWifiAction(lib, PendingWifiAction::RefreshStatus, "Checking Wi-Fi...");
+          ui.needs_redraw = true;
+          return;
+        }
+        break;
+      }
+      if (lib.wifi_view == WifiView::Password) {
+        constexpr int kKeyboardCount = 36;
+        if (button == gb::platform::Button::Left) {
+          lib.wifi_selected = (lib.wifi_selected + kKeyboardCount - 1) % kKeyboardCount;
+        } else if (button == gb::platform::Button::Right) {
+          lib.wifi_selected = (lib.wifi_selected + 1) % kKeyboardCount;
+        } else if (button == gb::platform::Button::Up) {
+          lib.wifi_selected = (lib.wifi_selected + kKeyboardCount - 6) % kKeyboardCount;
+        } else if (button == gb::platform::Button::Down) {
+          lib.wifi_selected = (lib.wifi_selected + 6) % kKeyboardCount;
+        } else if (button == gb::platform::Button::L) {
+          lib.wifi_keyboard_page = (lib.wifi_keyboard_page + 2) % 3;
+        } else if (button == gb::platform::Button::R) {
+          lib.wifi_keyboard_page = (lib.wifi_keyboard_page + 1) % 3;
+        } else if (button == gb::platform::Button::A) {
+          static constexpr std::string_view kPages[] = {
+              "abcdefghijklmnopqrstuvwxyz0123456789",
+              "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+              "!@#$%^&*()-_=+[]{};:,.?/\\|~`'\"     ",
+          };
+          if (lib.wifi_password.size() < 63) {
+            lib.wifi_password += kPages[lib.wifi_keyboard_page]
+                                         [static_cast<std::size_t>(lib.wifi_selected)];
+          }
+        } else if (button == gb::platform::Button::Y) {
+          if (!lib.wifi_password.empty()) lib.wifi_password.pop_back();
+        } else if (button == gb::platform::Button::X) {
+          if (lib.wifi_password.empty()) {
+            lib.status = "Enter the network password";
+          } else {
+            lib.wifi_view = WifiView::Networks;
+            QueueWifiAction(lib, PendingWifiAction::Connect,
+                            "Connecting to " + lib.wifi_selected_ssid + "...");
+          }
+        } else if (button == gb::platform::Button::B) {
+          lib.wifi_view = WifiView::Networks;
+          lib.wifi_password.clear();
+        } else {
+          break;
+        }
+        ui.needs_redraw = true;
+        return;
+      }
+
+      constexpr std::string_view kCountryLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      constexpr int kCountryCount = 26;
+      if (button == gb::platform::Button::Left) {
+        lib.wifi_selected = (lib.wifi_selected + kCountryCount - 1) % kCountryCount;
+      } else if (button == gb::platform::Button::Right) {
+        lib.wifi_selected = (lib.wifi_selected + 1) % kCountryCount;
+      } else if (button == gb::platform::Button::Up) {
+        lib.wifi_selected = (lib.wifi_selected + kCountryCount - 7) % kCountryCount;
+      } else if (button == gb::platform::Button::Down) {
+        lib.wifi_selected = (lib.wifi_selected + 7) % kCountryCount;
+      } else if (button == gb::platform::Button::A) {
+        if (lib.wifi_country_entry.size() < 2) {
+          lib.wifi_country_entry += kCountryLetters[static_cast<std::size_t>(lib.wifi_selected)];
+        }
+      } else if (button == gb::platform::Button::Y) {
+        if (!lib.wifi_country_entry.empty()) lib.wifi_country_entry.pop_back();
+      } else if (button == gb::platform::Button::X) {
+        if (lib.wifi_country_entry.size() == 2) {
+          lib.wifi_view = WifiView::Overview;
+          lib.wifi_selected = 2;
+          QueueWifiAction(lib, PendingWifiAction::SetCountry, "Setting wireless region...");
+        } else {
+          lib.status = "Choose a two-letter country";
+        }
+      } else if (button == gb::platform::Button::B) {
+        lib.wifi_view = WifiView::Overview;
+        lib.wifi_selected = 2;
+      } else {
+        break;
+      }
+      ui.needs_redraw = true;
+      return;
+    }
 
     case gb::ui::Screen::Bluetooth:
       if (button == gb::platform::Button::Left ||
@@ -3028,6 +3856,221 @@ void HandleButton(gb::platform::Button button,
   }
 }
 
+void DrawBatteryHud(gb::render::Surface240& surface,
+                    const gb::render::Theme& theme,
+                    const LibraryState& lib) {
+  if (!lib.battery_hud_visible) {
+    return;
+  }
+
+  constexpr auto kWarningRed = gb::render::Rgb565(230, 72, 72);
+  const bool low = lib.battery_status.available && !lib.battery_status.charging &&
+                   lib.battery_status.percent <= 20;
+  const bool critical = low && lib.battery_status.percent < 5;
+  const bool flash_on = !critical || ((gb::core::NowMs() / 400) % 2 == 0);
+
+  if (lib.battery_start_held) {
+    constexpr int kVolumeX = 8;
+    constexpr int kVolumeY = 10;
+    surface.FillRect(kVolumeX, kVolumeY, 74, 30, gb::render::Rgb565(0, 0, 0));
+    surface.StrokeRect(kVolumeX, kVolumeY, 74, 30, theme.panel_border);
+    gb::ui::widgets::DrawText(surface, kVolumeX + 6, kVolumeY + 5, "VOL", theme.text_dim, 1);
+    if (lib.volume_percent >= 0) {
+      const int fill = std::clamp((lib.volume_percent * 42) / 100, 0, 42);
+      surface.StrokeRect(kVolumeX + 25, kVolumeY + 7, 44, 9, theme.text_dim);
+      surface.FillRect(kVolumeX + 26, kVolumeY + 8, fill, 7, theme.accent);
+      gb::ui::widgets::DrawText(surface, kVolumeX + 6, kVolumeY + 19,
+                                std::to_string(lib.volume_percent) + "%", theme.text, 1);
+      gb::ui::widgets::DrawText(surface, kVolumeX + 33, kVolumeY + 19,
+                                "UP/DOWN", theme.text_dim, 1);
+    } else {
+      gb::ui::widgets::DrawText(surface, kVolumeX + 29, kVolumeY + 10,
+                                "UNAVAILABLE", theme.text_dim, 1);
+    }
+  }
+
+  constexpr int kX = 174;
+  constexpr int kY = 10;
+  surface.FillRect(kX, kY, 58, 30, gb::render::Rgb565(0, 0, 0));
+  surface.StrokeRect(kX, kY, 58, 30, low ? kWarningRed : theme.panel_border);
+  if (!lib.battery_status.available) {
+    gb::ui::widgets::DrawText(surface, kX + 6, kY + 10, "BAT N/A", theme.text_dim, 1);
+    return;
+  }
+
+  constexpr int kBatteryX = kX + 5;
+  constexpr int kBatteryY = kY + 5;
+  constexpr int kBatteryW = 22;
+  constexpr int kBatteryH = 11;
+  const auto outline = low ? kWarningRed : theme.text;
+  surface.StrokeRect(kBatteryX, kBatteryY, kBatteryW, kBatteryH, outline);
+  surface.FillRect(kBatteryX + kBatteryW, kBatteryY + 3, 2, 5, outline);
+  const int fill = std::clamp((lib.battery_status.percent * (kBatteryW - 4)) / 100,
+                              0, kBatteryW - 4);
+  const auto fill_color = low ? kWarningRed : theme.success;
+  if (flash_on) {
+    surface.FillRect(kBatteryX + 2, kBatteryY + 2, fill, kBatteryH - 4, fill_color);
+  }
+  gb::ui::widgets::DrawText(
+      surface, kX + 31, kY + 5,
+      std::to_string(lib.battery_status.percent) + "%", low ? kWarningRed : theme.text, 1);
+  gb::ui::widgets::DrawText(
+      surface, kX + 5, kY + 19,
+      (lib.battery_status.charging ? "CHG " : "BAT ") +
+          std::to_string(lib.battery_status.voltage).substr(0, 4) + "V",
+      low ? kWarningRed : theme.text_dim, 1);
+}
+
+int ParseAlsaVolumePercent(const std::string& text) {
+  const auto percent = text.find('%');
+  if (percent == std::string::npos || percent == 0) return -1;
+  std::size_t begin = percent;
+  while (begin > 0 && std::isdigit(static_cast<unsigned char>(text[begin - 1]))) {
+    --begin;
+  }
+  if (begin == percent) return -1;
+  try {
+    return std::clamp(std::stoi(text.substr(begin, percent - begin)), 0, 100);
+  } catch (...) {
+    return -1;
+  }
+}
+
+bool RefreshVolume(LibraryState& lib) {
+  const auto result = RunShellCapture("timeout 4s amixer -M -c 0 sget PCM");
+  const int parsed = ParseAlsaVolumePercent(result.output);
+  if (!result.process.launched || result.process.exit_code != 0 || parsed < 0) {
+    lib.volume_percent = -1;
+    lib.volume_error = "volume mixer unavailable";
+    return false;
+  }
+  lib.volume_percent = parsed;
+  lib.volume_error.clear();
+  return true;
+}
+
+bool AdjustVolume(LibraryState& lib, const int direction) {
+  const std::string amount = direction > 0 ? "5%+" : "5%-";
+  const auto result = RunShellCapture("timeout 4s amixer -M -c 0 sset PCM " + amount);
+  const int parsed = ParseAlsaVolumePercent(result.output);
+  if (!result.process.launched || result.process.exit_code != 0 || parsed < 0) {
+    lib.volume_percent = -1;
+    lib.volume_error = "volume change failed";
+    return false;
+  }
+  lib.volume_percent = parsed;
+  lib.volume_error.clear();
+  return true;
+}
+
+void UpdateBatteryHud(gb::platform::Ina219Battery* battery,
+                      gb::ui::UIState& state,
+                      LibraryState& lib) {
+  const auto now = gb::core::NowMs();
+  constexpr std::uint64_t kHoldThresholdMs = 850;
+  constexpr std::uint64_t kMonitorIntervalMs = 5000;
+  constexpr std::uint64_t kHeldReadIntervalMs = 1000;
+  constexpr std::uint64_t kPlugNoticeMs = 3000;
+  constexpr std::uint64_t kLowNoticeMs = 5000;
+  bool changed = false;
+  const bool held_long = lib.battery_start_held &&
+                         now - lib.battery_hold_started_ms >= kHoldThresholdMs;
+
+  if (battery != nullptr &&
+      (lib.battery_last_read_ms == 0 ||
+       now - lib.battery_last_read_ms >=
+           (held_long ? kHeldReadIntervalMs : kMonitorIntervalMs))) {
+    const auto previous = lib.battery_status;
+    const bool had_previous_sample = lib.battery_sample_seen;
+    std::string error;
+    gb::core::BatteryStatus status;
+    if (battery->Read(status, error)) {
+      lib.battery_status = status;
+      lib.battery_error.clear();
+      if (had_previous_sample &&
+          ((!previous.available && status.available) ||
+           (!previous.charging && status.charging))) {
+        lib.battery_auto_hud_until_ms = now + kPlugNoticeMs;
+      }
+      if (had_previous_sample && previous.percent > 20 && status.percent <= 20 &&
+          !status.charging) {
+        lib.battery_auto_hud_until_ms = std::max(lib.battery_auto_hud_until_ms,
+                                                  now + kLowNoticeMs);
+      }
+      lib.battery_sample_seen = true;
+    } else {
+      lib.battery_status = gb::core::BatteryStatus{};
+      lib.battery_error = error;
+    }
+    lib.battery_last_read_ms = now;
+    changed = previous.available != lib.battery_status.available ||
+              previous.percent != lib.battery_status.percent ||
+              previous.charging != lib.battery_status.charging;
+  }
+
+  if (held_long &&
+      (lib.volume_last_read_ms == 0 || now - lib.volume_last_read_ms >= 2000)) {
+    const int previous_volume = lib.volume_percent;
+    RefreshVolume(lib);
+    lib.volume_last_read_ms = now;
+    changed = changed || previous_volume != lib.volume_percent;
+  }
+
+  const bool critical = lib.battery_status.available &&
+                        !lib.battery_status.charging &&
+                        lib.battery_status.percent < 5;
+  if (critical &&
+      (lib.battery_last_flash_ms == 0 || now - lib.battery_last_flash_ms >= 400)) {
+    lib.battery_last_flash_ms = now;
+    changed = true;
+  }
+  const bool should_show = held_long || now < lib.battery_auto_hud_until_ms || critical;
+  changed = changed || lib.battery_hud_visible != should_show;
+  lib.battery_hud_visible = should_show;
+  if (changed) {
+    state.needs_redraw = true;
+  }
+}
+
+void UpdateTvModeState(gb::ui::UIState& state, LibraryState& lib) {
+  if (!lib.tv_mode) {
+    return;
+  }
+  const bool external_controller = std::any_of(
+      lib.input_devices.begin(), lib.input_devices.end(),
+      [](const gb::platform::EvdevDeviceInfo& device) {
+        const bool external_bus = device.bus == "usb" || device.is_bluetooth;
+        return external_bus && device.name != "GameBird Controls" &&
+               (device.is_gamepad || device.is_keyboard);
+      });
+  if (external_controller != lib.tv_external_controller) {
+    lib.tv_external_controller = external_controller;
+    state.needs_redraw = true;
+  }
+}
+
+void DrawTvModeOverlay(gb::render::Surface240& surface,
+                       const gb::render::Theme& theme,
+                       const LibraryState& lib) {
+  if (!lib.tv_mode) {
+    return;
+  }
+  const auto now = gb::core::NowMs();
+  const bool announce = now < lib.tv_mode_notice_until_ms;
+  if (!announce && lib.tv_external_controller) {
+    return;
+  }
+
+  surface.FillRect(20, 84, 200, lib.tv_external_controller ? 46 : 68, theme.bg);
+  surface.StrokeRect(20, 84, 200, lib.tv_external_controller ? 46 : 68,
+                     theme.accent);
+  gb::ui::widgets::DrawText(surface, 56, 96, "TV MODE ENABLED", theme.accent, 1);
+  if (!lib.tv_external_controller) {
+    gb::ui::widgets::DrawText(surface, 31, 112, "PLEASE PLUG IN AN EXTERNAL", theme.text, 1);
+    gb::ui::widgets::DrawText(surface, 56, 126, "USB CONTROLLER", theme.text, 1);
+  }
+}
+
 void DrawScreen(gb::render::Surface240& surface,
                 gb::ui::UIState& state,
                 const gb::render::Theme& theme,
@@ -3038,16 +4081,22 @@ void DrawScreen(gb::render::Surface240& surface,
       gb::ui::screens::DrawHome(surface, state, theme);
       break;
     case gb::ui::Screen::Systems: {
-      const auto rows = BuildSystemRows(lib);
-      gb::ui::screens::DrawSystems(surface, theme, rows, lib.system_selected,
+      const auto cards = BuildSystemCards(lib);
+      gb::ui::screens::DrawSystems(surface, theme, cards, lib.system_selected,
                                    lib.status);
       break;
     }
     case gb::ui::Screen::GameList: {
-      const auto rows = BuildGameRows(lib);
-      gb::ui::screens::DrawGameList(surface, theme, GameListTitle(lib), rows,
-                                    lib.game_selected,
-                                    lib.status);
+      if (lib.game_list_view == GameListView::System) {
+        const auto titles = BuildGameBrowserTitles(lib);
+        gb::ui::screens::DrawGameBrowser(
+            surface, theme, GameListTitle(lib), titles, lib.game_selected,
+            lib.details_ready ? lib.details.box_art_path : "", lib.status);
+      } else {
+        const auto rows = BuildGameRows(lib);
+        gb::ui::screens::DrawGameList(surface, theme, GameListTitle(lib), rows,
+                                      lib.game_selected, lib.status);
+      }
       break;
     }
     case gb::ui::Screen::Details: {
@@ -3070,6 +4119,15 @@ void DrawScreen(gb::render::Surface240& surface,
       const auto rows = BuildSettingsRows(lib);
       gb::ui::screens::DrawSettings(surface, theme, rows, lib.settings_selected,
                                     lib.status);
+      break;
+    }
+    case gb::ui::Screen::ScrapeProgress: {
+      const auto& progress = lib.scrape_progress;
+      gb::ui::screens::DrawScrapeProgress(
+          surface, theme, progress.completed, progress.total, progress.downloaded,
+          progress.skipped_existing, progress.missing,
+          progress.finished || !lib.scrape_active, progress.current_title,
+          Ellipsize(lib.status, 31));
       break;
     }
     case gb::ui::Screen::Tools: {
@@ -3173,6 +4231,29 @@ void DrawScreen(gb::render::Surface240& surface,
       }
       break;
     }
+    case gb::ui::Screen::Wifi: {
+      std::vector<gb::ui::screens::WifiNetworkItem> networks;
+      networks.reserve(lib.wifi_networks.size());
+      for (const auto& network : lib.wifi_networks) {
+        networks.push_back(gb::ui::screens::WifiNetworkItem{
+            .ssid = network.ssid,
+            .signal = network.signal,
+            .secured = network.secured,
+            .active = network.active,
+        });
+      }
+      const std::string keyboard_value =
+          lib.wifi_view == gb::ui::screens::WifiView::Country
+              ? lib.wifi_country_entry : lib.wifi_password;
+      const std::string title_ssid =
+          lib.wifi_view == gb::ui::screens::WifiView::Password
+              ? lib.wifi_selected_ssid : lib.wifi_connected_ssid;
+      gb::ui::screens::DrawWifi(surface, theme, lib.wifi_view, title_ssid,
+                                lib.wifi_connected_signal, lib.wifi_enabled,
+                                lib.wifi_country, networks, lib.wifi_selected,
+                                keyboard_value, lib.wifi_keyboard_page, lib.status);
+      break;
+    }
     case gb::ui::Screen::InputSetup: {
       surface.Clear(theme.bg);
       surface.FillRect(8, 8, 224, 224, theme.panel);
@@ -3257,10 +4338,10 @@ void DrawScreen(gb::render::Surface240& surface,
                                 "Last: " + Ellipsize(lib.input_test_last, 24),
                                 theme.text, 1);
       for (std::size_t i = 0; i < kButtonCount; ++i) {
-        const int column = i >= 6 ? 1 : 0;
+        const int column = static_cast<int>(i / 6);
         const int row = static_cast<int>(i % 6);
-        const int x = column == 0 ? 22 : 126;
-        const int y = 72 + row * 20;
+        const int x = 12 + column * 76;
+        const int y = 66 + row * 20;
         const std::string label =
             std::string(lib.input_test_seen[i] ? "[X] " : "[ ] ") +
             ButtonName(kButtonOrder[i]);
@@ -3268,7 +4349,7 @@ void DrawScreen(gb::render::Surface240& surface,
                                   lib.input_test_seen[i] ? theme.success : theme.text_dim,
                                   1);
       }
-      gb::ui::widgets::DrawText(surface, 16, 198,
+      gb::ui::widgets::DrawText(surface, 16, 190,
                                 Ellipsize(lib.input_debug_line2, 30), theme.text_dim, 1);
       gb::ui::widgets::DrawText(surface, 16, 216, "SELECT:BACK", theme.text_dim, 1);
       break;
@@ -3288,6 +4369,8 @@ void DrawScreen(gb::render::Surface240& surface,
                                   " " + std::to_string(ms) + "MS",
                               theme.text_dim, 1);
   }
+  DrawBatteryHud(surface, theme, lib);
+  DrawTvModeOverlay(surface, theme, lib);
 }
 
 int LaunchGameViaHelper(const Args& args, const int game_id, std::string& status) {
@@ -3330,7 +4413,7 @@ int LaunchRetroArchMenu(const Args& args, std::string& status) {
   const std::string append_cfg = RetroArchAppendConfigPath(args);
   if (!append_cfg.empty() && std::filesystem::exists(append_cfg)) {
     launch_argv.push_back("--appendconfig");
-    const std::string input_cfg = RetroArchInputConfigPath(args);
+    const std::string input_cfg = RetroArchActiveInputConfigPath();
     launch_argv.push_back(
         std::filesystem::exists(input_cfg) ? append_cfg + "|" + input_cfg : append_cfg);
   } else {
@@ -3475,10 +4558,30 @@ bool HandleCaptureInputEvent(const gb::platform::InputEvent& ev,
   return true;
 }
 
+gb::platform::Button ShellNavigationButton(const gb::platform::Button button) {
+  switch (button) {
+    case gb::platform::Button::LeftStickUp:
+    case gb::platform::Button::RightStickUp:
+      return gb::platform::Button::Up;
+    case gb::platform::Button::LeftStickDown:
+    case gb::platform::Button::RightStickDown:
+      return gb::platform::Button::Down;
+    case gb::platform::Button::LeftStickLeft:
+    case gb::platform::Button::RightStickLeft:
+      return gb::platform::Button::Left;
+    case gb::platform::Button::LeftStickRight:
+    case gb::platform::Button::RightStickRight:
+      return gb::platform::Button::Right;
+    default:
+      return button;
+  }
+}
+
 int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_input,
               const std::function<void(const gb::render::Surface240&)>& present,
               const std::function<int(int, std::string&)>& launch_game,
               const std::function<int(std::string&)>& launch_retroarch_menu,
+              gb::platform::Ina219Battery* battery,
               gb::db::Database& db,
               LibraryState& lib,
               const Args& args) {
@@ -3486,6 +4589,10 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
   const gb::render::Theme theme = gb::render::DefaultTheme();
   gb::ui::UIState state;
   state.show_diagnostics = lib.settings.show_diagnostics;
+  if (lib.tv_mode) {
+    lib.tv_mode_notice_until_ms = gb::core::NowMs() + 3000;
+  }
+  std::uint64_t next_library_refresh_ms = gb::core::NowMs() + 2000;
 
   while (state.running) {
     gb::platform::InputFrame frame;
@@ -3526,6 +4633,12 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
           continue;
         }
 
+        // The hotplug service unbinds this device in TV Mode. Keep this guard
+        // as a fail-safe for the short transition window before it disappears.
+        if (lib.tv_mode && ev.device_name == "GameBird Controls") {
+          continue;
+        }
+
         lib.last_input_device = ev.device_name.empty() ? "unknown" : ev.device_name;
         lib.last_input_bus_type = ev.bus_type;
         lib.last_input_vendor = ev.vendor;
@@ -3544,10 +4657,6 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
           continue;
         }
 
-        if (ev.raw_value <= 0) {
-          continue;
-        }
-
         if (!lib.settings.enable_bluetooth_gamepads && ev.is_bluetooth) {
           continue;
         }
@@ -3555,6 +4664,7 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
         bool has_mapping = false;
         std::string mapping_debug;
         const auto mapped = ApplyInputMapping(lib, ev, &has_mapping, &mapping_debug);
+        const auto shell_button = ShellNavigationButton(mapped);
         lib.input_debug_line1 = "code=" + std::to_string(ev.raw_code) +
                                 " typ=" + std::to_string(ev.raw_type) +
                                 " mapd=" + (ev.mapped_button ? "Y" : "N");
@@ -3565,6 +4675,52 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
           state.needs_redraw = true;
         }
         if (!has_mapping) {
+          continue;
+        }
+        if (shell_button == gb::platform::Button::Start && ev.raw_type == 1) {
+          const auto now = gb::core::NowMs();
+          if (ev.raw_value > 0) {
+            if (!lib.battery_start_held) {
+              lib.battery_start_held = true;
+              lib.battery_start_chord_used = false;
+              lib.battery_hold_started_ms = now;
+              lib.battery_last_read_ms = 0;
+              lib.volume_last_adjust_ms = 0;
+            }
+          } else {
+            const bool held_long = now - lib.battery_hold_started_ms >= 850;
+            const bool chord_used = lib.battery_start_chord_used;
+            lib.battery_start_held = false;
+            lib.battery_start_chord_used = false;
+            if (!held_long && !chord_used) {
+              HandleButton(shell_button, state, lib, db, args);
+            } else {
+              state.needs_redraw = true;
+            }
+          }
+          continue;
+        }
+        if (lib.battery_start_held && ev.raw_value > 0 &&
+            (shell_button == gb::platform::Button::Up ||
+             shell_button == gb::platform::Button::Down)) {
+          const auto now = gb::core::NowMs();
+          constexpr std::uint64_t kVolumeRepeatMs = 140;
+          if (lib.volume_last_adjust_ms == 0 ||
+              now - lib.volume_last_adjust_ms >= kVolumeRepeatMs) {
+            AdjustVolume(lib, shell_button == gb::platform::Button::Up ? 1 : -1);
+            lib.volume_last_adjust_ms = now;
+            lib.volume_last_read_ms = now;
+          }
+          lib.battery_start_chord_used = true;
+          state.needs_redraw = true;
+          continue;
+        }
+        // EV_ABS uses signed values: left/up are negative and are valid press
+        // events, while zero is the neutral position. Treating all non-positive
+        // values as releases made external controllers work only right/down.
+        if ((ev.raw_type == 1 && ev.raw_value <= 0) ||
+            (ev.raw_type == 3 && ev.raw_value == 0) ||
+            (ev.raw_type != 1 && ev.raw_type != 3 && ev.raw_value <= 0)) {
           continue;
         }
         if (state.screen == gb::ui::Screen::InputTest) {
@@ -3581,8 +4737,74 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
           }
           continue;
         }
-        HandleButton(mapped, state, lib, db, args);
+        HandleButton(shell_button, state, lib, db, args);
       }
+    }
+
+    UpdateBatteryHud(battery, state, lib);
+    UpdateTvModeState(state, lib);
+
+    // gblibd discovers ROMs copied over Samba in the background. Refresh the
+    // visible catalog as well, so uploads appear without restarting the shell
+    // or visiting the manual Rescan tool.
+    const auto library_now_ms = gb::core::NowMs();
+    if (library_now_ms >= next_library_refresh_ms) {
+      const auto before = LibraryUiSignature(lib);
+      LoadSystems(db, lib);
+      if (state.screen == gb::ui::Screen::GameList) {
+        ReloadGameList(db, lib);
+      }
+      if (LibraryUiSignature(lib) != before) {
+        state.needs_redraw = true;
+      }
+      next_library_refresh_ms = library_now_ms + 2000;
+    }
+
+    if (state.screen == gb::ui::Screen::ScrapeProgress && lib.scrape_active) {
+      // Present the current count before doing the next network request. A
+      // single request can take tens of seconds, so this screen must remain
+      // visible while it is running.
+      if (state.needs_redraw) {
+        const auto frame_start_ms = gb::core::NowMs();
+        surface.ClearDirtyRects();
+        DrawScreen(surface, state, theme, frame_start_ms, lib);
+        present(surface);
+        state.needs_redraw = false;
+        ++state.frame_count;
+      }
+
+      if (!lib.scrape_session.ProcessNext(db, lib.scrape_progress)) {
+        lib.scrape_active = false;
+        lib.status = "Scrape stopped: " + lib.scrape_progress.last_error;
+      } else if (lib.scrape_progress.finished) {
+        lib.scrape_active = false;
+        lib.status = "Complete: " + std::to_string(lib.scrape_progress.downloaded) +
+                     " downloaded, " + std::to_string(lib.scrape_progress.missing) +
+                     " not found";
+        RefreshSelectedGameDetails(db, lib);
+      } else {
+        lib.status = "Checking " + std::to_string(lib.scrape_progress.completed) +
+                     " of " + std::to_string(lib.scrape_progress.total);
+      }
+      state.needs_redraw = true;
+      continue;
+    }
+
+    if (lib.pending_wifi_action != PendingWifiAction::None) {
+      if (state.needs_redraw) {
+        const auto frame_start_ms = gb::core::NowMs();
+        surface.ClearDirtyRects();
+        DrawScreen(surface, state, theme, frame_start_ms, lib);
+        present(surface);
+        state.needs_redraw = false;
+        ++state.frame_count;
+      }
+      std::string wifi_status;
+      ExecuteWifiAction(lib, wifi_status);
+      lib.pending_wifi_action = PendingWifiAction::None;
+      if (!wifi_status.empty()) lib.status = wifi_status;
+      state.needs_redraw = true;
+      continue;
     }
 
     if (lib.pending_bluetooth_action != PendingBluetoothAction::None) {
@@ -3690,6 +4912,14 @@ int RunSdl(const Args& args, gb::db::Database& db, LibraryState& lib) {
       .is_keyboard = false,
       .joypad_index = 0,
   });
+  {
+    std::string input_config_error;
+    if (!WriteActiveRetroArchInputConfig(args, lib, input_config_error)) {
+      gb::core::Log(gb::core::LogLevel::Warn,
+                    "initial RetroArch input config failed: " + input_config_error);
+    }
+  }
+  gb::platform::Ina219Battery battery(args.battery_i2c, args.battery_address);
 
   const int rc = RunUiLoop(
       [&](gb::platform::InputFrame& frame, const int timeout_ms) {
@@ -3703,6 +4933,10 @@ int RunSdl(const Args& args, gb::db::Database& db, LibraryState& lib) {
           gb::core::Log(gb::core::LogLevel::Error, error);
           return 1;
         }
+        if (!WriteBatteryOverlayConfig(lib, error)) {
+          gb::core::Log(gb::core::LogLevel::Warn,
+                        "battery overlay config failed: " + error);
+        }
         return LaunchGameViaHelper(args, game_id, status);
       },
       [&](std::string& status) {
@@ -3712,8 +4946,13 @@ int RunSdl(const Args& args, gb::db::Database& db, LibraryState& lib) {
           gb::core::Log(gb::core::LogLevel::Error, error);
           return 1;
         }
+        if (!WriteBatteryOverlayConfig(lib, error)) {
+          gb::core::Log(gb::core::LogLevel::Warn,
+                        "battery overlay config failed: " + error);
+        }
         return LaunchRetroArchMenu(args, status);
       },
+      args.battery_disabled ? nullptr : &battery,
       db, lib, args);
 
   presenter.Shutdown();
@@ -3732,6 +4971,13 @@ int RunFbdev(const Args& args, gb::db::Database& db, LibraryState& lib) {
     return 1;
   }
   lib.input_devices = input.ConnectedDevices();
+  {
+    std::string input_config_error;
+    if (!WriteActiveRetroArchInputConfig(args, lib, input_config_error)) {
+      gb::core::Log(gb::core::LogLevel::Warn,
+                    "initial RetroArch input config failed: " + input_config_error);
+    }
+  }
   const int bt_gamepads = static_cast<int>(std::count_if(
       lib.input_devices.begin(), lib.input_devices.end(),
       [](const gb::platform::EvdevDeviceInfo& d) {
@@ -3740,6 +4986,7 @@ int RunFbdev(const Args& args, gb::db::Database& db, LibraryState& lib) {
   if (bt_gamepads > 0) {
     lib.status = "Bluetooth pads: " + std::to_string(bt_gamepads);
   }
+  gb::platform::Ina219Battery battery(args.battery_i2c, args.battery_address);
 
   const int rc = RunUiLoop(
       [&](gb::platform::InputFrame& frame, const int timeout_ms) {
@@ -3759,6 +5006,10 @@ int RunFbdev(const Args& args, gb::db::Database& db, LibraryState& lib) {
           gb::core::Log(gb::core::LogLevel::Error, error);
           return 1;
         }
+        if (!WriteBatteryOverlayConfig(lib, error)) {
+          gb::core::Log(gb::core::LogLevel::Warn,
+                        "battery overlay config failed: " + error);
+        }
         input.ReleaseDeviceGrabs();
         const int rc = LaunchGameViaHelper(args, game_id, status);
         input.AcquireDeviceGrabs();
@@ -3771,11 +5022,16 @@ int RunFbdev(const Args& args, gb::db::Database& db, LibraryState& lib) {
           gb::core::Log(gb::core::LogLevel::Error, error);
           return 1;
         }
+        if (!WriteBatteryOverlayConfig(lib, error)) {
+          gb::core::Log(gb::core::LogLevel::Warn,
+                        "battery overlay config failed: " + error);
+        }
         input.ReleaseDeviceGrabs();
         const int rc = LaunchRetroArchMenu(args, status);
         input.AcquireDeviceGrabs();
         return rc;
       },
+      args.battery_disabled ? nullptr : &battery,
       db, lib, args);
 
   input.Shutdown();
@@ -3794,6 +5050,14 @@ int main(int argc, char** argv) {
 
   gb::db::Database db;
   LibraryState lib;
+  lib.tv_mode = args.tv_mode;
+  {
+    auto data_dir = std::filesystem::path(args.db_path).parent_path();
+    if (data_dir.empty()) {
+      data_dir = ".";
+    }
+    lib.system_artwork_dir = (data_dir / "system-art").string();
+  }
 
   std::string settings_err;
   if (!gb::core::LoadRuntimeSettings(args.settings_path, lib.settings, settings_err)) {
@@ -3803,13 +5067,6 @@ int main(int argc, char** argv) {
   lib.input_profiles = ParseInputProfiles(lib.settings.input_profiles);
   lib.last_input_device = lib.settings.preferred_input_device;
   lib.last_input_summary = "none";
-  {
-    std::string input_config_error;
-    if (!WriteActiveRetroArchInputConfig(args, lib, input_config_error)) {
-      gb::core::Log(gb::core::LogLevel::Warn,
-                    "initial RetroArch input config failed: " + input_config_error);
-    }
-  }
 
   if (!db.Open(args.db_path) || !db.InitSchema()) {
     lib.db_ready = false;
@@ -3819,6 +5076,7 @@ int main(int argc, char** argv) {
   } else {
     lib.db_ready = true;
     LoadSystems(db, lib);
+    SelectGameBirdSystem(lib);
     const auto unavailable = std::count_if(
         lib.library_roots.begin(), lib.library_roots.end(),
         [](const gb::db::LibraryRootState& root) { return root.status != "ok"; });

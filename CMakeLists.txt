@@ -74,6 +74,21 @@ if(BUILD_TESTING)
   target_compile_options(image_cache_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME image_cache_test COMMAND image_cache_test)
 
+  add_executable(browser_screens_test
+    tests/browser_screens_test.cpp
+    src/ui/screens/systems.cpp
+    src/ui/screens/game_list.cpp
+    src/ui/widgets/list.cpp
+    src/ui/widgets/text.cpp
+    src/render/image_cache.cpp
+    src/render/surface_240.cpp
+    src/render/theme.cpp
+  )
+  target_include_directories(browser_screens_test PRIVATE src)
+  target_link_libraries(browser_screens_test PRIVATE PNG::PNG)
+  target_compile_options(browser_screens_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME browser_screens_test COMMAND browser_screens_test)
+
   add_executable(artwork_index_test
     tests/artwork_index_test.cpp
     src/core/logging.cpp
@@ -83,11 +98,38 @@ if(BUILD_TESTING)
     src/scrape/jobs.cpp
     src/scrape/providers/provider_none.cpp
     src/scrape/providers/provider_local_dat.cpp
+    src/scrape/providers/provider_libretro.cpp
+    src/platform/proc.cpp
   )
   target_include_directories(artwork_index_test PRIVATE src)
   target_link_libraries(artwork_index_test PRIVATE ${SQLITE3_LIBRARY})
   target_compile_options(artwork_index_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME artwork_index_test COMMAND artwork_index_test)
+
+  add_executable(libretro_scraper_test
+    tests/libretro_scraper_test.cpp
+    src/scrape/providers/provider_libretro.cpp
+    src/platform/proc.cpp
+  )
+  target_include_directories(libretro_scraper_test PRIVATE src)
+  target_compile_options(libretro_scraper_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME libretro_scraper_test COMMAND libretro_scraper_test)
+
+  add_executable(battery_status_test
+    tests/battery_status_test.cpp
+    src/core/battery_status.cpp
+  )
+  target_include_directories(battery_status_test PRIVATE src)
+  target_compile_options(battery_status_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME battery_status_test COMMAND battery_status_test)
+
+  add_executable(ui_state_test
+    tests/ui_state_test.cpp
+    src/ui/ui_state.cpp
+  )
+  target_include_directories(ui_state_test PRIVATE src)
+  target_compile_options(ui_state_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME ui_state_test COMMAND ui_state_test)
 
   # Device-only integration probe. It is intentionally not registered with
   # CTest because creating a temporary uinput device requires root on Linux.
@@ -113,6 +155,7 @@ add_executable(gbshell
   src/main.cpp
   src/core/time.cpp
   src/core/logging.cpp
+  src/core/battery_status.cpp
   src/core/launch_config.cpp
   src/core/retroarch_input.cpp
   src/core/settings.cpp
@@ -122,7 +165,9 @@ add_executable(gbshell
   src/ui/screens/game_list.cpp
   src/ui/screens/details.cpp
   src/ui/screens/settings.cpp
+  src/ui/screens/scrape.cpp
   src/ui/screens/tools.cpp
+  src/ui/screens/wifi.cpp
   src/ui/widgets/list.cpp
   src/ui/widgets/grid.cpp
   src/ui/widgets/text.cpp
@@ -136,19 +181,39 @@ add_executable(gbshell
   src/platform/input_sdl.cpp
   src/platform/input_evdev.cpp
   src/platform/audio_sdl.cpp
+  src/platform/battery_ina219.cpp
   src/platform/proc.cpp
   ${GBSHELL_DB_SOURCES}
   src/scrape/jobs.cpp
   src/scrape/providers/provider_none.cpp
   src/scrape/providers/provider_screenscraper.cpp
+  src/scrape/providers/provider_libretro.cpp
   src/scrape/providers/provider_local_dat.cpp
 )
+
+# The Libretro catalog provider is only used while metadata is refreshed. On
+# memory-constrained Pi Zero 2 W builds, compiling this large translation unit
+# with optimisation can exceed available RAM. Keep the runtime shell optimised
+# while compiling this background-only provider without optimisation.
+set_source_files_properties(
+  src/main.cpp
+  src/scrape/providers/provider_libretro.cpp
+  PROPERTIES COMPILE_OPTIONS "-O0")
 
 target_include_directories(gbshell PRIVATE src)
 target_link_libraries(gbshell PRIVATE PkgConfig::SDL2 ${SQLITE3_LIBRARY} PNG::PNG)
 target_compile_options(gbshell PRIVATE -Wall -Wextra -Wpedantic)
 
 if(GBSHELL_BUILD_SERVICES)
+  add_executable(gbhud
+    services/gbhud/main.cpp
+    src/core/logging.cpp
+    src/core/time.cpp
+    src/platform/input_evdev.cpp
+  )
+  target_include_directories(gbhud PRIVATE src)
+  target_compile_options(gbhud PRIVATE -Wall -Wextra -Wpedantic)
+
   add_executable(gblibd
     services/gblibd/main.cpp
     src/core/time.cpp
@@ -157,6 +222,8 @@ if(GBSHELL_BUILD_SERVICES)
     src/scrape/jobs.cpp
     src/scrape/providers/provider_none.cpp
     src/scrape/providers/provider_local_dat.cpp
+    src/scrape/providers/provider_libretro.cpp
+    src/platform/proc.cpp
   )
   target_include_directories(gblibd PRIVATE src)
   target_link_libraries(gblibd PRIVATE ${SQLITE3_LIBRARY})

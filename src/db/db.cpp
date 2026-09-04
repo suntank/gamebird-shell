@@ -665,8 +665,10 @@ bool Database::GetGameDetails(const int game_id, GameDetails& out) {
 bool Database::ListPresentAssetCandidates(std::vector<AssetCandidate>& out) {
   out.clear();
   static const std::string kSql =
-      "SELECT id,system_id,title,filename,path FROM games "
-      "WHERE is_present=1 ORDER BY id;";
+      "SELECT g.id,g.system_id,g.title,g.filename,g.path,"
+      "COALESCE(a.box_art_path,'') FROM games g "
+      "LEFT JOIN assets a ON a.game_id=g.id "
+      "WHERE g.is_present=1 ORDER BY g.id;";
   Statement stmt(db_, kSql);
   if (!stmt.Ok()) {
     SetError("failed to prepare ListPresentAssetCandidates");
@@ -683,6 +685,7 @@ bool Database::ListPresentAssetCandidates(std::vector<AssetCandidate>& out) {
     row.title = text(2);
     row.filename = text(3);
     row.rom_path = text(4);
+    row.box_art_path = text(5);
     out.push_back(std::move(row));
   }
   return true;
@@ -1185,13 +1188,16 @@ bool Database::UpsertGameMetadata(const MetadataUpdate& update) {
   static const std::string kSql =
       "INSERT INTO game_metadata(game_id,release_year,publisher,developer,genre,players,"
       "description,source,source_id,updated_at) "
-      "VALUES(?1,?2,NULL,NULL,?3,?4,?5,?6,NULL,?7) "
+      "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) "
       "ON CONFLICT(game_id) DO UPDATE SET "
       "release_year=excluded.release_year, "
+      "publisher=excluded.publisher, "
+      "developer=excluded.developer, "
       "genre=excluded.genre, "
       "players=excluded.players, "
       "description=excluded.description, "
       "source=excluded.source, "
+      "source_id=excluded.source_id, "
       "updated_at=excluded.updated_at;";
 
   Statement stmt(db_, kSql);
@@ -1207,11 +1213,18 @@ bool Database::UpsertGameMetadata(const MetadataUpdate& update) {
   } else {
     sqlite3_bind_null(stmt.Get(), 2);
   }
-  sqlite3_bind_text(stmt.Get(), 3, update.genre.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt.Get(), 4, update.players);
-  sqlite3_bind_text(stmt.Get(), 5, update.description.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt.Get(), 6, update.source.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64(stmt.Get(), 7, now);
+  sqlite3_bind_text(stmt.Get(), 3, update.publisher.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt.Get(), 4, update.developer.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt.Get(), 5, update.genre.c_str(), -1, SQLITE_TRANSIENT);
+  if (update.players > 0) {
+    sqlite3_bind_int(stmt.Get(), 6, update.players);
+  } else {
+    sqlite3_bind_null(stmt.Get(), 6);
+  }
+  sqlite3_bind_text(stmt.Get(), 7, update.description.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt.Get(), 8, update.source.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt.Get(), 9, update.source_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt.Get(), 10, now);
   if (sqlite3_step(stmt.Get()) != SQLITE_DONE) {
     SetError("failed to execute UpsertGameMetadata");
     return false;
