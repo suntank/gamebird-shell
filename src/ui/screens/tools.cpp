@@ -2,6 +2,7 @@
 
 #include "ui/widgets/list.h"
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
 
 namespace gb::ui::screens {
 
@@ -10,16 +11,12 @@ void DrawTools(render::Surface240& surface,
                const std::vector<std::string>& rows,
                const int selected,
                const std::string& status) {
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 224, theme.panel);
-  surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-
-  widgets::DrawText(surface, 16, 18, "TOOLS", theme.accent, 1);
-  widgets::DrawList(surface, 16, 40, 208, 154, 18, rows, selected, theme);
+  widgets::DrawMenuFrame(surface, theme, "TOOLS");
+  widgets::DrawList(surface, 16, 40, 208, 150, 24, rows, selected, theme);
   if (!status.empty()) {
-    widgets::DrawText(surface, 16, 196, status, theme.text_dim, 1);
+    widgets::DrawContentText(surface, 16, 196, status, theme.text_dim, 1);
   }
-  widgets::DrawText(surface, 16, 210, "A:RUN  B:BACK", theme.text_dim, 1);
+  widgets::DrawMenuFooter(surface, theme, "A:RUN  B:BACK");
 }
 
 }  // namespace gb::ui::screens

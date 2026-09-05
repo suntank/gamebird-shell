@@ -151,12 +151,12 @@ set(GBSHELL_DB_SOURCES
   src/db/queries.cpp
 )
 
-add_executable(gbshell
-  src/main.cpp
+add_library(gbshell_runtime OBJECT
   src/core/time.cpp
   src/core/logging.cpp
   src/core/battery_status.cpp
   src/core/launch_config.cpp
+  src/core/play_session.cpp
   src/core/retroarch_input.cpp
   src/core/settings.cpp
   src/ui/ui_state.cpp
@@ -168,6 +168,7 @@ add_executable(gbshell
   src/ui/screens/scrape.cpp
   src/ui/screens/tools.cpp
   src/ui/screens/wifi.cpp
+  src/ui/screens/update.cpp
   src/ui/widgets/list.cpp
   src/ui/widgets/grid.cpp
   src/ui/widgets/text.cpp
@@ -200,8 +201,12 @@ set_source_files_properties(
   src/scrape/providers/provider_libretro.cpp
   PROPERTIES COMPILE_OPTIONS "-O0")
 
-target_include_directories(gbshell PRIVATE src)
-target_link_libraries(gbshell PRIVATE PkgConfig::SDL2 ${SQLITE3_LIBRARY} PNG::PNG)
+target_include_directories(gbshell_runtime PUBLIC src)
+target_link_libraries(gbshell_runtime PUBLIC PkgConfig::SDL2 ${SQLITE3_LIBRARY} PNG::PNG)
+target_compile_options(gbshell_runtime PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(gbshell src/main.cpp)
+target_link_libraries(gbshell PRIVATE gbshell_runtime)
 target_compile_options(gbshell PRIVATE -Wall -Wextra -Wpedantic)
 
 if(GBSHELL_BUILD_SERVICES)
@@ -231,6 +236,7 @@ if(GBSHELL_BUILD_SERVICES)
   add_executable(gblaunch
     services/gblaunch/main.cpp
     src/core/launch_config.cpp
+    src/core/play_session.cpp
     src/core/logging.cpp
     src/core/time.cpp
     src/platform/proc.cpp
@@ -241,4 +247,29 @@ if(GBSHELL_BUILD_SERVICES)
 
   target_compile_options(gblibd PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(gblaunch PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(play_session_test tests/play_session_test.cpp
+    src/core/play_session.cpp src/core/launch_config.cpp src/db/db.cpp
+    src/core/logging.cpp src/core/time.cpp)
+  target_include_directories(play_session_test PRIVATE src)
+  target_link_libraries(play_session_test PRIVATE ${SQLITE3_LIBRARY})
+  target_compile_options(play_session_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME play_session_test COMMAND play_session_test)
+
+  add_executable(shell_flow_test tests/shell_flow_test.cpp)
+  set_source_files_properties(tests/shell_flow_test.cpp PROPERTIES COMPILE_OPTIONS "-O0")
+  target_include_directories(shell_flow_test PRIVATE src)
+  target_link_libraries(shell_flow_test PRIVATE gbshell_runtime)
+  target_compile_options(shell_flow_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME shell_flow_test COMMAND shell_flow_test)
+endif()
+
+if(BUILD_TESTING AND GBSHELL_BUILD_SERVICES)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME gblaunch_session_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gblaunch_session_test.py $<TARGET_FILE:gblaunch>)
+  endif()
 endif()

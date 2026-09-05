@@ -11,6 +11,8 @@
 #include "render/surface_240.h"
 #include "render/theme.h"
 #include "ui/screens/home.h"
+#include "ui/widgets/list.h"
+#include "ui/widgets/chrome.h"
 
 namespace {
 
@@ -78,8 +80,27 @@ int main() {
       {"Chrono Trigger", "Super Metroid", "Zelda"}, 1, cover.string(), "");
   Expect(surface.Pixels()[100 * 240 + 120] == gb::render::Rgb565(240, 48, 48),
          "cover art occupies the browser artwork area");
-  Expect(surface.Pixels()[204 * 240 + 8] == theme.panel_border,
+  Expect(surface.Pixels()[182 * 240 + 16] == theme.accent,
          "selected game row is highlighted");
+
+  surface.Clear(theme.bg);
+  gb::ui::widgets::DrawList(surface, 16, 40, 208, 48, 24,
+                            {std::string(100, 'W'), "Second", "Third"}, 0, theme);
+  bool margin_clean = true;
+  for (int y = 40; y < 64; ++y) {
+    for (int x = 224; x < 227; ++x) {
+      margin_clean &= surface.Pixels()[y * 240 + x] == theme.bg;
+    }
+  }
+  Expect(margin_clean, "long list labels stay inside their row");
+  Expect(surface.Pixels()[40 * 240 + 227] == theme.accent,
+         "overflowing list displays scroll thumb");
+  surface.Clear(theme.bg);
+  gb::ui::widgets::DrawList(surface, 16, 40, 208, 48, 0, {"Invalid"}, 0, theme);
+  Expect(surface.Pixels()[40 * 240 + 16] == theme.bg,
+         "zero-height rows do not draw or divide by zero");
+  Expect(gb::ui::widgets::FitLabel("Long title", 36) == "Lon...",
+         "bounded labels reserve room for ellipsis");
 
   std::error_code ec;
   std::filesystem::remove_all(temp, ec);

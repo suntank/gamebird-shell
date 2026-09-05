@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for Raspberry Pi OS and GameBird Shell updates
+After=network-online.target data.mount
+Wants=network-online.target
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/gamebird/gamebird-updater check
+Nice=10
+IOSchedulingClass=idle

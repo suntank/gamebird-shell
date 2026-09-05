@@ -4,27 +4,23 @@
 
 #include "ui/widgets/list.h"
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
 
 namespace gb::ui::screens {
 
 void DrawHome(render::Surface240& surface,
               const ui::UIState& state,
               const render::Theme& theme) {
-  static const std::vector<std::string> items = {
-      "Recent",
-      "Favorites",
-      "Tools",
-      "Settings",
-      "Back to Systems",
+  const std::vector<std::string> items = {
+      state.continue_available ? "Continue playing" : "Continue (no recent game)",
+      "Browse games", "Recent", "Favorites", "Tools", "Settings",
   };
-
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 26, theme.panel);
-  surface.StrokeRect(8, 8, 224, 26, theme.panel_border);
-  widgets::DrawText(surface, 14, 16, "START MENU", theme.text, 1);
-
-  widgets::DrawList(surface, 14, 44, 212, 166, 32, items, state.home_selected, theme);
-  widgets::DrawText(surface, 12, 218, "A:SELECT  START:BACK", theme.text_dim, 1);
+  widgets::DrawMenuFrame(surface, theme, "GAMEBIRD");
+  widgets::DrawContentText(surface, 16, 40,
+      state.continue_available ? state.continue_title : "Your next game starts here",
+      state.continue_available ? theme.accent : theme.text_dim);
+  widgets::DrawList(surface, 16, 64, 208, 132, 22, items, state.home_selected, theme);
+  widgets::DrawMenuFooter(surface, theme, "A:OPEN  B:BACK  START:BACK");
 }
 
 }  // namespace gb::ui::screens

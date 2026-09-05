@@ -53,21 +53,66 @@ cmake --build build -j
 Controls:
 
 - D-pad / Arrow keys: navigate
-- `A` / `Z`: select
-- `B` / `X`: back
-- `A` on game list: launch selected item
-- `X` / `A`: toggle favorite (in game list)
-- `Y` / `S`: toggle hidden (in game list)
-- `Start` / Enter: open or close Start Menu; on the handheld, hold physical
-  Start for about one second to show battery/volume status, then use D-pad
-  Up/Down for volume
-- `Select` / Backspace: return Home
+- `A` / `Z`: open the selected item or choose a menu action
+- `B` / `X`: return to the previous screen
+- `Start` / Enter: open or close the contextual menu (game menu while browsing
+  games, system menu on the console carousel, main menu from settings/tools)
+- `Select` / Backspace: shortcut to the console carousel
+- On the handheld, hold physical Start for about one second to show
+  battery/volume status, then use D-pad Up/Down for volume
 - `Esc`: quit
-- Settings screen: `A` toggles/saves selected option
-- Tools screen: `A` runs selected action
+- Settings screen: `A` toggles/saves the selected option
+- Tools screen: `A` runs the selected action
 - Input Setup: `A` starts remapping, `Y` opens the live input test, and `X`
   clears the active profile
-- Live Input Test: press each control to mark it; `Select` returns
+- Live Input Test: press each control to mark it; `Select` returns (B is tested
+  as an input here)
+
+### Continue playing
+
+The shell opens on Home, with the last visible, present game featured above
+**Continue playing**. Press A to open its game menu, then A again to Resume
+when a matching Continue save exists. First-time games offer **Play**. Games
+with a Continue save also offer **Start fresh**, which boots normally without
+loading the automatic state; ordinary in-game battery/memory-card saves are
+not erased.
+
+On any game, A or Start opens the same menu: Play/Resume, Start fresh,
+Resume previous save (when available), Game details, Add/remove favorite,
+Hide/unhide game, Launch options, and Main menu. B returns to the screen that
+opened the menu. The old X/Y/R shortcuts for game actions are replaced by
+these labeled actions.
+
+System and game selection, plus per-system/Recent/Favorites game positions,
+are stored by catalog ID in `browse-state` next to the catalog database.
+**Browse games** returns to the last browsing view. Background rescans retain
+selection when titles are inserted or reordered. Navigation persistence is
+separate from settings, so it does not save uncommitted settings edits.
+
+RetroArch launches use a private Continue state location under
+`continue/` next to the catalog database. On a normal emulator exit, supported
+cores write an automatic state. The helper promotes a newly written, nonempty
+state only after a successful exit and retains the previous state as a backup.
+The game menu confirms **Progress saved - ready to resume** after promotion;
+unsupported cores or unsuccessful saves report that no new Resume save was
+created. A failed launch or crash preserves the existing Continue states.
+
+Continue states are tied to the ROM and core file identities; replacing a ROM
+or updating/changing a core makes old Continue states unavailable rather than
+loading them into a potentially incompatible core. Existing states are kept
+on disk. The session does not set `savefile_directory` or erase SRAM/memory-card saves.
+It owns the automatic-state directory and disables RetroArch's additional
+per-core/game `.cfg` auto-overrides so they cannot redirect these states;
+use the shell's **Launch options** for core and configuration overrides.
+Numbered manual state slots created during managed sessions are retained
+separately under `manual/`; pre-existing states in other RetroArch directories
+are not imported. This provides
+save-and-resume on deliberate exit, not suspend-to-RAM or protection against
+cutting power during gameplay.
+
+For helper use: `gblaunch --db <catalog> --game-id <id> --resume`,
+`--resume-backup`, or `--fresh` (the default). `--dry-run` validates and shows
+the base launch command without creating a play session or changing saves.
 
 Pi framebuffer mode:
 
@@ -81,7 +126,7 @@ rate; keeping presentation on a video thread prevents panel transfers from
 slowing the emulation and audio run loop.
 
 While a RetroArch game is running, hold **Select** and press **Start** to exit
-back to GameBird Shell.
+back to GameBird Shell and create a Continue save when the core supports it.
 
 Or pin input device explicitly:
 
@@ -180,15 +225,13 @@ condition is reported as storage offline. A ROM absent from a successfully
 scanned root is treated as deleted. Root health appears beside Rescan Library,
 in scan logs, and in exported diagnostics.
 
-Milestone 6 browse + launch flow:
+Browse and launch flow:
 
-1. Run `gblibd` scan.
-2. Launch `gbshell`.
-3. Home -> `Systems` -> choose a system -> browse games.
-4. In game list use `X` to favorite and `Y` to hide/unhide.
-5. Home -> `Recent` and `Favorites` are live filtered views. In any game list,
-   press `R` for Details; Details uses `A` to launch, `X` to favorite, and `Y`
-   to hide.
+1. Run `gblibd` to scan the library.
+2. Open **Browse games** from Home and select a system.
+3. Choose a game with A, then select Play or Resume.
+4. Use the game menu for details, favorites, hiding, or launch options.
+5. Recent and Favorites use the same game menu and navigation as system browsing.
 
 ## Local artwork
 
@@ -277,8 +320,8 @@ Normal launches run the same checks, log the effective configuration, and stop
 before starting RetroArch when required launch files are invalid.
 
 The launch template in each `config/systems.d/*.json` file is the authoritative
-system default. In the shell, press `Y` on a system or `Start` on a game to open
-Launch Options; the bottom of that screen shows the currently effective core,
+system default. In the shell, press Start on a system or game and select
+**Launch options**; the bottom of that screen shows the currently effective core,
 whether it came from the definition/system/game override, and the active config.
 
 Input profiles created in GameBird Shell are also exported to
@@ -302,6 +345,32 @@ integration probe:
 ```bash
 sudo ./build/evdev_hotplug_integration
 ```
+
+## System updater
+
+Install the protected updater on the console with:
+
+```bash
+sudo ./scripts/install-updater.sh
+```
+
+The **Tools -> System Update** screen checks Raspberry Pi OS packages and the
+`main` branch of `suntank/gamebird-shell`, shows separate availability and a
+progress bar, and installs only after the player presses `A`. The checker runs
+shortly after boot and every six hours. When it finds an update, the shell
+briefly directs the player to the updater screen.
+
+On an OverlayFS console, installation uses `overlayroot-chroot` to update the
+protected lower root and binds the protected firmware and persistent `/data`
+mounts into that environment. The live read-only arrangement is restored and
+the console reboots after a successful install. Package lists, progress state,
+and logs are kept under `/data/gamebird-update`; they are outside the anonymous
+ROM/config Samba share. Keep power connected throughout an installation.
+
+The GitHub repository must be anonymously readable for retail consoles to
+discover and download shell builds. Do not ship a reusable private-repository
+token in an image: a purchaser can recover it. A private project should instead
+publish signed release artifacts through a public, read-only update channel.
 
 Milestone 7 settings and tools:
 

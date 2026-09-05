@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
+#include "ui/widgets/list.h"
 
 namespace gb::ui::screens {
 namespace {
@@ -25,10 +27,7 @@ void Signal(render::Surface240& surface, int x, int y, const int signal,
 
 void Header(render::Surface240& surface, const render::Theme& theme,
             const std::string& title) {
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 224, theme.panel);
-  surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-  widgets::DrawText(surface, 16, 18, title, theme.accent, 1);
+  widgets::DrawMenuFrame(surface, theme, title);
 }
 
 std::string Keyboard(const int page) {
@@ -45,7 +44,7 @@ void DrawKeyboard(render::Surface240& surface, const render::Theme& theme,
   constexpr int kCellWidth = 31;
   constexpr int kCellHeight = 18;
   constexpr int kStartX = 25;
-  constexpr int kStartY = 112;
+  constexpr int kStartY = 100;
   for (int i = 0; i < 36; ++i) {
     const int x = kStartX + (i % kColumns) * kCellWidth;
     const int y = kStartY + (i / kColumns) * kCellHeight;
@@ -54,7 +53,7 @@ void DrawKeyboard(render::Surface240& surface, const render::Theme& theme,
     surface.StrokeRect(x, y, 28, 15, active ? theme.text : theme.panel_border);
     std::string glyph(1, chars[static_cast<std::size_t>(i)]);
     if (glyph == " ") glyph = "_";
-    widgets::DrawText(surface, x + 11, y + 4, glyph,
+    widgets::DrawContentText(surface, x + 11, y + 4, glyph,
                       active ? theme.bg : theme.text, 1);
   }
 }
@@ -73,7 +72,7 @@ void DrawCountryKeyboard(render::Surface240& surface, const render::Theme& theme
     const bool active = i == selected;
     surface.FillRect(x, y, 22, 16, active ? theme.accent : theme.bg);
     surface.StrokeRect(x, y, 22, 16, active ? theme.text : theme.panel_border);
-    widgets::DrawText(surface, x + 8, y + 4, std::string(1, kChars[i]),
+    widgets::DrawContentText(surface, x + 8, y + 4, std::string(1, kChars[i]),
                       active ? theme.bg : theme.text, 1);
   }
 }
@@ -98,11 +97,11 @@ void DrawWifi(render::Surface240& surface,
     surface.StrokeRect(16, 42, 208, 46, theme.panel_border);
     const bool connected = !connected_ssid.empty();
     surface.FillRect(25, 56, 8, 8, connected ? theme.success : theme.accent);
-    widgets::DrawText(surface, 42, 50, connected ? "CONNECTED" :
+    widgets::DrawContentText(surface, 42, 50, connected ? "CONNECTED" :
                       (wifi_enabled ? "NOT CONNECTED" : "WI-FI OFF"),
                       connected ? theme.success : theme.text_dim, 1);
-    widgets::DrawText(surface, 42, 66,
-                      connected ? Fit(connected_ssid, 21) : "Choose a network to connect",
+    widgets::DrawContentText(surface, 42, 66,
+                      connected ? Fit(connected_ssid, 21) : "Choose a network",
                       theme.text, 1);
     if (connected) Signal(surface, 195, 57, connected_signal, theme);
 
@@ -111,24 +110,17 @@ void DrawWifi(render::Surface240& surface,
         connected ? "Disconnect from Wi-Fi" : "Disconnect (not connected)",
         "Wireless region: " + (country.empty() ? std::string("SET COUNTRY") : country),
     };
-    for (int i = 0; i < 3; ++i) {
-      const int y = 104 + i * 28;
-      const bool active = i == selected;
-      surface.FillRect(16, y, 208, 22, active ? theme.accent : theme.panel);
-      surface.StrokeRect(16, y, 208, 22, active ? theme.text : theme.panel_border);
-      widgets::DrawText(surface, 25, y + 7, rows[static_cast<std::size_t>(i)],
-                        active ? theme.bg : theme.text, 1);
-    }
-    if (!status.empty()) widgets::DrawText(surface, 16, 196, Fit(status, 34), theme.text_dim, 1);
-    widgets::DrawText(surface, 16, 218, "A:SELECT  B:TOOLS", theme.text_dim, 1);
+    widgets::DrawList(surface, 16, 104, 208, 84, 28, rows, selected, theme);
+    if (!status.empty()) widgets::DrawContentText(surface, 16, 196, Fit(status, 34), theme.text_dim, 1);
+    widgets::DrawMenuFooter(surface, theme, "A:SELECT  B:TOOLS");
     return;
   }
 
   if (view == WifiView::Networks) {
     Header(surface, theme, "NEARBY WI-FI");
-    widgets::DrawText(surface, 16, 32, "X:RESCAN  A:CONNECT  B:BACK", theme.text_dim, 1);
+    widgets::DrawMenuFooter(surface, theme, "A:CONNECT  X:RESCAN  B:BACK");
     if (networks.empty()) {
-      widgets::DrawText(surface, 16, 90, "NO NETWORKS FOUND", theme.text_dim, 1);
+      widgets::DrawContentText(surface, 16, 90, "NO NETWORKS FOUND", theme.text_dim, 1);
     }
     const int first = std::max(0, selected - 4);
     for (int row = 0; row < 7 && first + row < static_cast<int>(networks.size()); ++row) {
@@ -137,41 +129,42 @@ void DrawWifi(render::Surface240& surface,
       const int y = 44 + row * 22;
       const bool active = i == selected;
       surface.FillRect(16, y, 208, 19, active ? theme.accent : theme.bg);
-      if (active) surface.StrokeRect(16, y, 208, 19, theme.text);
-      widgets::DrawText(surface, 22, y + 5, network.active ? "*" : " ",
+      if (active) surface.FillRect(16, y, 3, 19, theme.accent);
+      widgets::DrawContentText(surface, 22, y + 5, network.active ? "*" : " ",
                         active ? theme.bg : theme.success, 1);
-      widgets::DrawText(surface, 32, y + 5, Fit(network.ssid, 23),
+      widgets::DrawContentText(surface, 32, y + 5, Fit(network.ssid, 22),
                         active ? theme.bg : theme.text, 1);
-      if (network.secured) widgets::DrawText(surface, 172, y + 5, "LOCK", active ? theme.bg : theme.text_dim, 1);
+      if (network.secured) widgets::DrawContentText(surface, 172, y + 5, "LOCK", active ? theme.bg : theme.text_dim, 1);
       Signal(surface, 199, y + 2, network.signal, theme);
     }
-    if (!status.empty()) widgets::DrawText(surface, 16, 204, Fit(status, 34), theme.text_dim, 1);
+    if (!status.empty()) widgets::DrawContentText(surface, 16, 198, Fit(status, 34), theme.text_dim, 1);
     return;
   }
 
   if (view == WifiView::Password) {
     Header(surface, theme, "CONNECT TO " + Fit(connected_ssid, 20));
-    widgets::DrawText(surface, 16, 42, "PASSWORD", theme.text_dim, 1);
+    widgets::DrawContentText(surface, 16, 42, "PASSWORD", theme.text_dim, 1);
     const std::string hidden(password_or_country.size(), '*');
     surface.FillRect(16, 56, 208, 26, theme.bg);
     surface.StrokeRect(16, 56, 208, 26, theme.panel_border);
-    widgets::DrawText(surface, 23, 65, hidden.empty() ? "(enter password)" : Fit(hidden, 31), theme.text, 1);
-    widgets::DrawText(surface, 16, 92,
+    widgets::DrawContentText(surface, 23, 65, hidden.empty() ? "(enter password)" : Fit(hidden, 31), theme.text, 1);
+    widgets::DrawContentText(surface, 16, 88,
                       keyboard_page == 0 ? "lowercase" :
                       (keyboard_page == 1 ? "UPPERCASE" : "symbols"),
                       theme.text_dim, 1);
     DrawKeyboard(surface, theme, Keyboard(keyboard_page), selected);
-    widgets::DrawText(surface, 16, 222, "A:TYPE Y:DEL X:JOIN L/R:PAGE B:BACK", theme.text_dim, 1);
+    widgets::DrawMenuFooter(surface, theme, "A:TYPE Y:DEL X:JOIN B:BACK");
+    widgets::DrawContentText(surface, 108, 88, "L/R:PAGE", theme.text_dim);
     return;
   }
 
   Header(surface, theme, "WIRELESS REGION");
-  widgets::DrawText(surface, 16, 42, "CURRENT: " + (country.empty() ? std::string("NOT SET") : country), theme.text_dim, 1);
-  widgets::DrawText(surface, 16, 60, "NEW CODE: " + (password_or_country.empty() ? std::string("__") : password_or_country), theme.text, 1);
-  widgets::DrawText(surface, 16, 80, "Choose two country letters", theme.text_dim, 1);
+  widgets::DrawContentText(surface, 16, 42, "CURRENT: " + (country.empty() ? std::string("NOT SET") : country), theme.text_dim, 1);
+  widgets::DrawContentText(surface, 16, 60, "NEW CODE: " + (password_or_country.empty() ? std::string("__") : password_or_country), theme.text, 1);
+  widgets::DrawContentText(surface, 16, 80, "Choose two country letters", theme.text_dim, 1);
   DrawCountryKeyboard(surface, theme, selected);
-  if (!status.empty()) widgets::DrawText(surface, 16, 202, Fit(status, 34), theme.text_dim, 1);
-  widgets::DrawText(surface, 16, 222, "A:TYPE Y:DEL X:SET B:BACK", theme.text_dim, 1);
+  if (!status.empty()) widgets::DrawContentText(surface, 16, 202, Fit(status, 34), theme.text_dim, 1);
+  widgets::DrawMenuFooter(surface, theme, "A:TYPE Y:DEL X:SET B:BACK");
 }
 
 }  // namespace gb::ui::screens

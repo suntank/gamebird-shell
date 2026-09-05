@@ -4,6 +4,7 @@
 
 #include "render/image_cache.h"
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
 
 namespace gb::ui::screens {
 namespace {
@@ -25,7 +26,7 @@ void DrawCenteredText(render::Surface240& surface,
                       const std::uint16_t color,
                       const int scale = 1) {
   const int width = widgets::MeasureTextWidth(text, scale);
-  widgets::DrawText(surface, std::max(0, (surface.Width() - width) / 2), y, text,
+  widgets::DrawContentText(surface, std::max(0, (surface.Width() - width) / 2), y, text,
                     color, scale);
 }
 
@@ -50,10 +51,7 @@ void DrawSystems(render::Surface240& surface,
                  const std::vector<SystemCarouselItem>& systems,
                  const int selected,
                  const std::string& status) {
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 224, theme.panel);
-  surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-  DrawCenteredText(surface, 17, "SYSTEMS", theme.accent);
+  widgets::DrawMenuFrame(surface, theme, "SYSTEMS");
 
   if (systems.empty()) {
     DrawCenteredText(surface, 102, "NO SYSTEMS FOUND", theme.text_dim);
@@ -85,19 +83,19 @@ void DrawSystems(render::Surface240& surface,
       const int previous =
           (current + static_cast<int>(systems.size()) - 1) % systems.size();
       const int next = (current + 1) % systems.size();
-      widgets::DrawText(surface, 16, 197,
+      widgets::DrawContentText(surface, 16, 197,
                         "< " + FitText(systems[previous].name, 12), theme.text_dim, 1);
       const std::string next_text = FitText(systems[next].name, 12) + " >";
-      widgets::DrawText(surface,
+      widgets::DrawContentText(surface,
                         224 - widgets::MeasureTextWidth(next_text), 197, next_text,
                         theme.text_dim, 1);
     }
   }
 
   if (!status.empty()) {
-    DrawCenteredText(surface, 211, FitText(status, 34), theme.text_dim);
+    widgets::DrawMenuFooter(surface, theme, status);
   } else {
-    DrawCenteredText(surface, 218, "A:OPEN  Y:OPTIONS  START:MENU", theme.text_dim);
+    widgets::DrawMenuFooter(surface, theme, "A:OPEN  B:BACK  START:MENU");
   }
 }
 

@@ -2,6 +2,7 @@
 
 #include "render/image_cache.h"
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
 
 namespace gb::ui::screens {
 
@@ -18,13 +19,9 @@ void DrawDetails(render::Surface240& surface,
                  const bool is_favorite,
                  const bool is_hidden,
                  const std::string& status) {
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 224, theme.panel);
-  surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-
-  widgets::DrawText(surface, 16, 18, "DETAILS", theme.accent, 1);
-  widgets::DrawText(surface, 16, 34, title, theme.text, 1);
-  widgets::DrawText(surface, 16, 48, system, theme.text_dim, 1);
+  widgets::DrawMenuFrame(surface, theme, "DETAILS");
+  widgets::DrawContentText(surface, 16, 34, title, theme.text, 1);
+  widgets::DrawContentText(surface, 16, 48, system, theme.text_dim, 1);
 
   static render::ImageCache image_cache;
   std::string artwork_error;
@@ -34,28 +31,29 @@ void DrawDetails(render::Surface240& surface,
                          theme.panel_border);
   } else {
     surface.FillRect(16, 62, 60, 60, theme.panel_border);
-    widgets::DrawText(surface, 24, 86, "NO ART", theme.text_dim, 1);
+    widgets::DrawContentText(surface, 24, 86, "NO ART", theme.text_dim, 1);
   }
-  widgets::DrawText(surface, 88, 66,
+  widgets::DrawContentText(surface, 88, 66,
                     "YEAR: " + (release_year > 0 ? std::to_string(release_year) : "-") ,
                     theme.text, 1);
-  widgets::DrawText(surface, 88, 82,
-                    "GENRE: " + (genre.empty() ? "-" : genre), theme.text, 1);
-  widgets::DrawText(surface, 88, 98,
+  widgets::DrawContentText(surface, 88, 82,
+                    widgets::FitLabel("GENRE: " + (genre.empty() ? "-" : genre), 136), theme.text, 1);
+  widgets::DrawContentText(surface, 88, 98,
                     "PLAYERS: " + (players > 0 ? std::to_string(players) : "-"),
                     theme.text, 1);
-  widgets::DrawText(surface, 88, 114,
+  widgets::DrawContentText(surface, 88, 114,
                     std::string("FAV: ") + (is_favorite ? "YES" : "NO") +
                         " HIDE: " + (is_hidden ? "YES" : "NO"),
                     theme.text_dim, 1);
-  widgets::DrawText(surface, 16, 136, filename, theme.text_dim, 1);
-  widgets::DrawText(surface, 16, 150,
+  surface.FillRect(16, 129, 208, 1, theme.panel_border);
+  widgets::DrawContentText(surface, 16, 136, filename, theme.text_dim, 1);
+  widgets::DrawContentText(surface, 16, 150,
                     "META: " + (metadata_source.empty() ? "none" : metadata_source),
                     theme.text_dim, 1);
   if (!status.empty()) {
-    widgets::DrawText(surface, 16, 184, status, theme.text_dim, 1);
+    widgets::DrawContentText(surface, 16, 184, status, theme.text_dim, 1);
   }
-  widgets::DrawText(surface, 16, 210, "A:RUN X:FAV Y:HIDE B:BACK", theme.text_dim, 1);
+  widgets::DrawMenuFooter(surface, theme, "A:MENU  B:BACK  START:MENU");
 }
 
 }  // namespace gb::ui::screens

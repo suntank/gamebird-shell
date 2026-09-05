@@ -17,6 +17,7 @@
 #include "core/logging.h"
 #include "core/battery_status.h"
 #include "core/launch_config.h"
+#include "core/play_session.h"
 #include "core/settings.h"
 #include "core/retroarch_input.h"
 #include "core/time.h"
@@ -31,9 +32,11 @@
 #include "render/theme.h"
 #include "scrape/jobs.h"
 #include "ui/screens/home.h"
+#include "ui/screens/update.h"
 #include "ui/ui_state.h"
 #include "ui/widgets/list.h"
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
 
 namespace {
 constexpr std::uint64_t kPostLaunchInputBlockMs = 1200;
@@ -318,11 +321,30 @@ enum class GameListView {
   Favorites,
 };
 
+struct UpdateStatus {
+  std::string phase = "READY";
+  std::string message = "Press A to check for updates";
+  int progress = 0;
+  int os_updates = 0;
+  bool shell_update = false;
+  bool reboot_required = false;
+};
+
 struct LibraryState {
   bool db_ready = false;
   std::string status;
 
   gb::core::RuntimeSettings settings;
+  gb::core::BrowseState browse;
+  gb::core::BrowseState saved_browse;
+  std::uint64_t browse_changed_ms = 0;
+  int continue_game_id = 0;
+  gb::db::GameDetails menu_game;
+  gb::ui::Screen game_menu_return = gb::ui::Screen::GameList;
+  int context_selected = 0;
+  bool can_resume = false;
+  bool can_resume_backup = false;
+  gb::core::PlayMode pending_play_mode = gb::core::PlayMode::Fresh;
 
   std::vector<gb::db::SystemSummary> systems;
   std::vector<gb::db::GameSummary> games;
@@ -345,6 +367,10 @@ struct LibraryState {
   std::uint64_t volume_last_read_ms = 0;
   std::uint64_t volume_last_adjust_ms = 0;
   std::string volume_error;
+  UpdateStatus update_status;
+  std::uint64_t update_last_read_ms = 0;
+  std::uint64_t update_notice_until_ms = 0;
+  bool update_notice_announced = false;
   bool tv_mode = false;
   bool tv_external_controller = false;
   std::uint64_t tv_mode_notice_until_ms = 0;
@@ -997,6 +1023,92 @@ void SelectGameBirdSystem(LibraryState& lib) {
   }
 }
 
+std::string BrowseKey(const LibraryState& lib) {
+  if (lib.game_list_view == GameListView::Recent) return "recent";
+  if (lib.game_list_view == GameListView::Favorites) return "favorites";
+  return "system:" + lib.current_system_id;
+}
+
+void RememberCurrentGame(LibraryState& lib) {
+  if (lib.game_selected >= 0 && lib.game_selected < static_cast<int>(lib.games.size()))
+    lib.browse.selected_games[BrowseKey(lib)] = lib.games[lib.game_selected].id;
+}
+
+void RestoreGameSelection(LibraryState& lib) {
+  const auto saved = lib.browse.selected_games.find(BrowseKey(lib));
+  if (saved != lib.browse.selected_games.end()) {
+    const auto it = std::find_if(lib.games.begin(), lib.games.end(),
+        [&](const auto& game) { return game.id == saved->second; });
+    if (it != lib.games.end()) lib.game_selected = static_cast<int>(it - lib.games.begin());
+  }
+  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
+}
+
+void RememberBrowse(LibraryState& lib, const gb::ui::UIState& ui) {
+  RememberCurrentGame(lib);
+  if (ui.screen != gb::ui::Screen::Systems && ui.screen != gb::ui::Screen::GameList) return;
+  lib.browse.screen = ui.screen == gb::ui::Screen::Systems ? "systems" : "games";
+  lib.browse.view = lib.game_list_view == GameListView::Recent ? "recent" :
+                    lib.game_list_view == GameListView::Favorites ? "favorites" : "system";
+  if (!lib.systems.empty()) {
+    ClampSelection(lib.system_selected, static_cast<int>(lib.systems.size()));
+    lib.browse.system_id = lib.systems[lib.system_selected].id;
+  }
+}
+
+void RefreshContinue(gb::db::Database& db, LibraryState& lib, gb::ui::UIState& ui) {
+  std::vector<gb::db::GameSummary> recent;
+  lib.continue_game_id = 0;
+  ui.continue_available = false;
+  ui.continue_title.clear();
+  if (lib.db_ready && db.ListRecentGames(false, 1, recent) && !recent.empty()) {
+    lib.continue_game_id = recent.front().id;
+    ui.continue_available = true;
+    ui.continue_title = recent.front().title;
+  }
+}
+
+void RefreshGameMenu(gb::db::Database& db, LibraryState& lib, const Args& args) {
+  lib.can_resume = lib.can_resume_backup = false;
+  db.GetGameDetails(lib.menu_game.id, lib.menu_game);
+  gb::core::EffectiveLaunch launch;
+  std::string error;
+  if (gb::core::ResolveEffectiveLaunch(db, lib.menu_game.id, launch, error)) {
+    lib.can_resume = gb::core::HasContinueSave(args.db_path, launch);
+    lib.can_resume_backup = gb::core::HasContinueSave(args.db_path, launch, true);
+  }
+}
+
+void OpenGameMenu(gb::db::Database& db, gb::ui::UIState& ui, LibraryState& lib,
+                  const Args& args, int id) {
+  if (id <= 0 || !db.GetGameDetails(id, lib.menu_game)) {
+    lib.status = "Game is no longer available";
+    ui.needs_redraw = true;
+    return;
+  }
+  lib.game_menu_return = ui.screen == gb::ui::Screen::Details
+      ? lib.game_menu_return : ui.screen;
+  lib.context_selected = 0;
+  RefreshGameMenu(db, lib, args);
+  lib.status.clear();
+  ui.screen = gb::ui::Screen::GameMenu;
+  ui.needs_redraw = true;
+}
+
+enum class GameAction { Resume, Fresh, Backup, Details, Favorite, Hide, Options, Home };
+std::vector<std::pair<GameAction, std::string>> GameActions(const LibraryState& lib) {
+  std::vector<std::pair<GameAction, std::string>> rows;
+  if (lib.can_resume) rows.emplace_back(GameAction::Resume, "Resume");
+  rows.emplace_back(GameAction::Fresh, lib.can_resume ? "Start fresh" : "Play");
+  if (lib.can_resume_backup) rows.emplace_back(GameAction::Backup, "Resume previous save");
+  rows.emplace_back(GameAction::Details, "Game details");
+  rows.emplace_back(GameAction::Favorite, lib.menu_game.is_favorite ? "Remove favorite" : "Add to favorites");
+  rows.emplace_back(GameAction::Hide, lib.menu_game.is_hidden ? "Unhide game" : "Hide game");
+  rows.emplace_back(GameAction::Options, "Launch options");
+  rows.emplace_back(GameAction::Home, "Main menu");
+  return rows;
+}
+
 void LoadGamesForCurrentSystem(gb::db::Database& db, LibraryState& lib) {
   lib.games.clear();
 
@@ -1013,7 +1125,7 @@ void LoadGamesForCurrentSystem(gb::db::Database& db, LibraryState& lib) {
     return;
   }
 
-  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
+  RestoreGameSelection(lib);
 }
 
 void LoadRecentGames(gb::db::Database& db, LibraryState& lib) {
@@ -1025,7 +1137,7 @@ void LoadRecentGames(gb::db::Database& db, LibraryState& lib) {
     lib.status = "DB READ ERROR";
     return;
   }
-  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
+  RestoreGameSelection(lib);
 }
 
 void LoadFavoriteGames(gb::db::Database& db, LibraryState& lib) {
@@ -1037,10 +1149,11 @@ void LoadFavoriteGames(gb::db::Database& db, LibraryState& lib) {
     lib.status = "DB READ ERROR";
     return;
   }
-  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
+  RestoreGameSelection(lib);
 }
 
 void ReloadGameList(gb::db::Database& db, LibraryState& lib) {
+  RememberCurrentGame(lib);
   switch (lib.game_list_view) {
     case GameListView::System:
       LoadGamesForCurrentSystem(db, lib);
@@ -1080,26 +1193,13 @@ std::string GameListTitle(const LibraryState& lib) {
   return "GAMES";
 }
 
-void OpenSelectedGameDetails(gb::db::Database& db,
-                             gb::ui::UIState& ui,
-                             LibraryState& lib) {
-  if (lib.games.empty()) {
-    return;
-  }
-  RefreshSelectedGameDetails(db, lib);
-  if (!lib.details_ready) {
-    return;
-  }
-  ui.screen = gb::ui::Screen::Details;
-  ui.needs_redraw = true;
-}
-
 void SelectSystem(gb::db::Database& db,
                   LibraryState& lib,
                   const int selection) {
   if (lib.systems.empty()) {
     return;
   }
+  RememberCurrentGame(lib);
   const int count = static_cast<int>(lib.systems.size());
   lib.system_selected = (selection % count + count) % count;
   const auto& system = lib.systems[static_cast<std::size_t>(lib.system_selected)];
@@ -1195,6 +1295,71 @@ std::vector<std::string> BuildSettingsRows(const LibraryState& lib) {
   };
 }
 
+bool UpdateIsBusy(const UpdateStatus& update) {
+  const std::string phase = ToLower(update.phase);
+  return phase == "starting" || phase == "checking" ||
+         phase == "preparing" || phase == "downloading" ||
+         phase == "updating pi os" || phase == "building gamebird" ||
+         phase == "installing gamebird" || phase == "finalizing" ||
+         phase == "rebooting";
+}
+
+bool ReadUpdateStatus(LibraryState& lib) {
+  std::ifstream input("/data/gamebird-update/status");
+  if (!input) return false;
+
+  UpdateStatus next;
+  std::string line;
+  while (std::getline(input, line)) {
+    const auto equals = line.find('=');
+    if (equals == std::string::npos) continue;
+    const std::string key = Trim(line.substr(0, equals));
+    const std::string value = Trim(line.substr(equals + 1));
+    try {
+      if (key == "phase") next.phase = value;
+      else if (key == "message") next.message = value;
+      else if (key == "progress") next.progress = std::clamp(std::stoi(value), 0, 100);
+      else if (key == "os_updates") next.os_updates = std::max(0, std::stoi(value));
+      else if (key == "shell_update") next.shell_update = value == "1";
+      else if (key == "reboot_required") next.reboot_required = value == "1";
+    } catch (...) {
+      // Ignore a partially written or malformed field. The updater publishes
+      // with atomic rename, so this is only defensive against manual edits.
+    }
+  }
+
+  const bool changed = next.phase != lib.update_status.phase ||
+                       next.message != lib.update_status.message ||
+                       next.progress != lib.update_status.progress ||
+                       next.os_updates != lib.update_status.os_updates ||
+                       next.shell_update != lib.update_status.shell_update ||
+                       next.reboot_required != lib.update_status.reboot_required;
+  lib.update_status = std::move(next);
+
+  const bool available = lib.update_status.os_updates > 0 ||
+                         lib.update_status.shell_update;
+  if (available && !UpdateIsBusy(lib.update_status) &&
+      !lib.update_notice_announced) {
+    lib.update_notice_until_ms = gb::core::NowMs() + 8000;
+    lib.update_notice_announced = true;
+  } else if (!available) {
+    lib.update_notice_announced = false;
+  }
+  return changed;
+}
+
+bool StartUpdaterUnit(const std::string& unit, std::string& status) {
+  const auto result = gb::platform::RunProcessBlocking(
+      {"sudo", "-n", "/usr/bin/systemctl", "--no-block", "start", unit});
+  if (!result.launched || result.exit_code != 0) {
+    status = "Updater service unavailable";
+    return false;
+  }
+  status = unit == "gamebird-update.service" ? "Starting update..."
+                                               : "Checking for updates...";
+  return true;
+}
+
 std::vector<std::string> BuildToolsRows(const LibraryState& lib) {
   int unavailable_roots = 0;
   for (const auto& root : lib.library_roots) {
@@ -1214,6 +1379,10 @@ std::vector<std::string> BuildToolsRows(const LibraryState& lib) {
       "Export Diagnostics",
       "Input Setup",
       "Wi-Fi",
+      std::string("System Update") +
+          ((lib.update_status.os_updates > 0 || lib.update_status.shell_update)
+               ? " [READY]"
+               : ""),
       std::string("Bluetooth Pads: ") +
           (lib.settings.enable_bluetooth_gamepads ? "AUTO" : "OFF"),
       "RetroArch Menu",
@@ -1866,7 +2035,7 @@ bool OpenLaunchOptionsForSystem(gb::db::Database& db,
     return false;
   }
 
-  lib.launch_options_return_screen = gb::ui::Screen::Systems;
+  lib.launch_options_return_screen = gb::ui::Screen::SystemMenu;
   lib.launch_options_selected = 0;
   lib.launch_options_scope_type = "system";
   lib.launch_options_scope_id = sys.id;
@@ -1896,12 +2065,8 @@ bool OpenLaunchOptionsForSystem(gb::db::Database& db,
 bool OpenLaunchOptionsForGame(gb::db::Database& db,
                               gb::ui::UIState& ui,
                               LibraryState& lib) {
-  if (lib.games.empty()) {
-    lib.status = "No game selected";
-    return false;
-  }
-  ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
-  const auto& game = lib.games[static_cast<std::size_t>(lib.game_selected)];
+  const auto& game = lib.menu_game;
+  if (game.id <= 0) { lib.status = "No game selected"; return false; }
 
   gb::db::LaunchInfo launch;
   if (!db.GetLaunchInfo(game.id, launch)) {
@@ -1931,7 +2096,7 @@ bool OpenLaunchOptionsForGame(gb::db::Database& db,
       (!has_sys_override || sys_override.core_path.empty()) ? template_core
                                                             : sys_override.core_path;
 
-  lib.launch_options_return_screen = gb::ui::Screen::GameList;
+  lib.launch_options_return_screen = gb::ui::Screen::GameMenu;
   lib.launch_options_selected = 0;
   lib.launch_options_scope_type = "game";
   lib.launch_options_scope_id = launch.rom_path;
@@ -2908,7 +3073,7 @@ void RunToolAction(const Args& args,
                    LibraryState& lib,
                    gb::ui::UIState& ui) {
   const auto cfg = MakeWorkerConfig(args, lib);
-  if (lib.tools_selected != 10) {
+  if (lib.tools_selected != 11) {
     lib.tools_exit_confirm = false;
   }
 
@@ -2962,6 +3127,18 @@ void RunToolAction(const Args& args,
       break;
 
     case 7:
+      ui.screen = gb::ui::Screen::Update;
+      if (!UpdateIsBusy(lib.update_status) &&
+          lib.update_status.os_updates == 0 &&
+          !lib.update_status.shell_update) {
+        StartUpdaterUnit("gamebird-update-check.service", lib.status);
+        lib.update_status.phase = "CHECKING";
+        lib.update_status.message = lib.status;
+        lib.update_status.progress = 0;
+      }
+      break;
+
+    case 8:
       lib.settings.enable_bluetooth_gamepads =
           !lib.settings.enable_bluetooth_gamepads;
       lib.status = lib.settings.enable_bluetooth_gamepads
@@ -2974,7 +3151,7 @@ void RunToolAction(const Args& args,
       }
       break;
 
-    case 8:
+    case 9:
       if (!lib.pending_launch_retroarch_menu && lib.pending_launch_game_id == 0) {
         lib.pending_launch_retroarch_menu = true;
         lib.status = "LAUNCHING RETROARCH...";
@@ -2983,7 +3160,7 @@ void RunToolAction(const Args& args,
       }
       break;
 
-    case 9:
+    case 10:
       ui.screen = gb::ui::Screen::Bluetooth;
       lib.bluetooth_show_paired = false;
       lib.bluetooth_scanned_selected = 0;
@@ -2995,7 +3172,7 @@ void RunToolAction(const Args& args,
                            "Refreshing Bluetooth...");
       break;
 
-    case 10:
+    case 11:
       if (!lib.tools_exit_confirm) {
         lib.tools_exit_confirm = true;
         lib.status = "Exit to console? A=yes B=no";
@@ -3018,6 +3195,7 @@ void HandleButton(gb::platform::Button button,
                   LibraryState& lib,
                   gb::db::Database& db,
                   const Args& args) {
+  RememberBrowse(lib, ui);
   if (ui.screen == gb::ui::Screen::Bluetooth &&
       lib.bluetooth_modal != BluetoothModalType::None) {
     if (button == gb::platform::Button::A) {
@@ -3063,17 +3241,27 @@ void HandleButton(gb::platform::Button button,
     return;
   }
 
-  // Start owns the global shell menu. A short press switches between the
-  // system carousel and the Start menu; a held press is handled separately
-  // by the battery HUD code in the input loop.
+  // Short Start opens the contextual menu; held Start remains battery/volume.
   if (button == gb::platform::Button::Start) {
     lib.tools_exit_confirm = false;
-    if (ui.screen == gb::ui::Screen::Home) {
-      LoadSystems(db, lib);
-      lib.status.clear();
+    if (ui.screen == gb::ui::Screen::GameList && !lib.games.empty()) {
+      ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
+      OpenGameMenu(db, ui, lib, args, lib.games[lib.game_selected].id);
+    } else if (ui.screen == gb::ui::Screen::Details) {
+      ui.screen = gb::ui::Screen::GameMenu;
+    } else if (ui.screen == gb::ui::Screen::GameMenu) {
+      ui.screen = lib.game_menu_return;
+    } else if (ui.screen == gb::ui::Screen::Systems) {
+      lib.context_selected = 0;
+      ui.screen = gb::ui::Screen::SystemMenu;
+    } else if (ui.screen == gb::ui::Screen::SystemMenu) {
       ui.screen = gb::ui::Screen::Systems;
+    } else if (ui.screen == gb::ui::Screen::Home) {
+      ui.screen = ui.menu_return_screen;
     } else {
+      ui.menu_return_screen = ui.screen;
       ui.screen = gb::ui::Screen::Home;
+      RefreshContinue(db, lib, ui);
     }
     ui.needs_redraw = true;
     return;
@@ -3090,50 +3278,92 @@ void HandleButton(gb::platform::Button button,
 
   switch (ui.screen) {
     case gb::ui::Screen::Home:
-      if (button == gb::platform::Button::Up) {
-        ui.home_selected = (ui.home_selected + 4) % 5;
-        ui.needs_redraw = true;
-        return;
-      }
-      if (button == gb::platform::Button::Down) {
-        ui.home_selected = (ui.home_selected + 1) % 5;
-        ui.needs_redraw = true;
-        return;
-      }
-      if (button == gb::platform::Button::A) {
+      if (button == gb::platform::Button::Up || button == gb::platform::Button::Down) {
+        ui.home_selected = (ui.home_selected + (button == gb::platform::Button::Up ? 5 : 1)) % 6;
+      } else if (button == gb::platform::Button::A) {
         if (ui.home_selected == 0) {
-          lib.game_list_view = GameListView::Recent;
-          lib.game_selected = 0;
-          LoadRecentGames(db, lib);
-          lib.status.clear();
-          ui.screen = gb::ui::Screen::GameList;
+          RefreshContinue(db, lib, ui);
+          if (lib.continue_game_id) OpenGameMenu(db, ui, lib, args, lib.continue_game_id);
+          else lib.status = "Play a game to see it here";
         } else if (ui.home_selected == 1) {
-          lib.game_list_view = GameListView::Favorites;
+          ui.screen = lib.browse.screen == "games" ? gb::ui::Screen::GameList : gb::ui::Screen::Systems;
+          if (ui.screen == gb::ui::Screen::GameList) ReloadGameList(db, lib);
+        } else if (ui.home_selected == 2 || ui.home_selected == 3) {
+          lib.game_list_view = ui.home_selected == 2 ? GameListView::Recent : GameListView::Favorites;
           lib.game_selected = 0;
-          LoadFavoriteGames(db, lib);
+          if (ui.home_selected == 2) LoadRecentGames(db, lib); else LoadFavoriteGames(db, lib);
           lib.status.clear();
           ui.screen = gb::ui::Screen::GameList;
-        } else if (ui.home_selected == 2) {
+        } else if (ui.home_selected == 4) {
           lib.tools_exit_confirm = false;
           ui.screen = gb::ui::Screen::Tools;
-        } else if (ui.home_selected == 3) {
-          ui.screen = gb::ui::Screen::Settings;
-        } else if (ui.home_selected == 4) {
-          LoadSystems(db, lib);
-          lib.status.clear();
-          ui.screen = gb::ui::Screen::Systems;
+        } else if (ui.home_selected == 5) ui.screen = gb::ui::Screen::Settings;
+      } else if (button == gb::platform::Button::B) ui.screen = ui.menu_return_screen;
+      ui.needs_redraw = true;
+      return;
+
+    case gb::ui::Screen::SystemMenu:
+      if (button == gb::platform::Button::Up || button == gb::platform::Button::Down)
+        lib.context_selected = (lib.context_selected + (button == gb::platform::Button::Up ? 2 : 1)) % 3;
+      else if (button == gb::platform::Button::B) ui.screen = gb::ui::Screen::Systems;
+      else if (button == gb::platform::Button::A) {
+        if (lib.context_selected == 0) OpenSystem(db, ui, lib);
+        else if (lib.context_selected == 1) OpenLaunchOptionsForSystem(db, ui, lib);
+        else { ui.menu_return_screen = gb::ui::Screen::Systems; ui.screen = gb::ui::Screen::Home; RefreshContinue(db, lib, ui); }
+      }
+      ui.needs_redraw = true;
+      return;
+
+    case gb::ui::Screen::GameMenu: {
+      const auto actions = GameActions(lib);
+      const int count = static_cast<int>(actions.size());
+      ClampSelection(lib.context_selected, count);
+      if (button == gb::platform::Button::Up || button == gb::platform::Button::Down)
+        lib.context_selected = (lib.context_selected + (button == gb::platform::Button::Up ? count - 1 : 1)) % count;
+      else if (button == gb::platform::Button::B) ui.screen = lib.game_menu_return;
+      else if (button == gb::platform::Button::A) {
+        switch (actions[lib.context_selected].first) {
+          case GameAction::Resume:
+          case GameAction::Fresh:
+          case GameAction::Backup:
+            lib.pending_play_mode = actions[lib.context_selected].first == GameAction::Resume ? gb::core::PlayMode::Resume :
+                actions[lib.context_selected].first == GameAction::Backup ? gb::core::PlayMode::Backup : gb::core::PlayMode::Fresh;
+            lib.pending_launch_game_id = lib.menu_game.id;
+            lib.status = lib.pending_play_mode == gb::core::PlayMode::Fresh ? "Starting game..." : "Resuming game...";
+            break;
+          case GameAction::Details:
+            lib.details = lib.menu_game; lib.details_ready = true;
+            ui.screen = gb::ui::Screen::Details;
+            break;
+          case GameAction::Favorite: {
+            bool value = false;
+            if (db.ToggleGameFavorite(lib.menu_game.id, value)) {
+              lib.status = value ? "Added to favorites" : "Removed from favorites";
+              RefreshGameMenu(db, lib, args); ReloadGameList(db, lib); LoadSystems(db, lib);
+            } else lib.status = "Could not change favorite";
+            break;
+          }
+          case GameAction::Hide: {
+            bool value = false;
+            if (db.ToggleGameHidden(lib.menu_game.id, value)) {
+              lib.status = value ? "Game hidden" : "Game visible";
+              ReloadGameList(db, lib); LoadSystems(db, lib);
+              ui.screen = lib.game_menu_return;
+              RefreshContinue(db, lib, ui);
+            } else lib.status = "Could not change visibility";
+            break;
+          }
+          case GameAction::Options: OpenLaunchOptionsForGame(db, ui, lib); break;
+          case GameAction::Home:
+            ui.menu_return_screen = gb::ui::Screen::GameMenu;
+            ui.screen = gb::ui::Screen::Home;
+            RefreshContinue(db, lib, ui);
+            break;
         }
-        ui.needs_redraw = true;
-        return;
       }
-      if (button == gb::platform::Button::B) {
-        LoadSystems(db, lib);
-        lib.status.clear();
-        ui.screen = gb::ui::Screen::Systems;
-        ui.needs_redraw = true;
-        return;
-      }
-      break;
+      ui.needs_redraw = true;
+      return;
+    }
 
     case gb::ui::Screen::Systems:
       if (button == gb::platform::Button::Up ||
@@ -3159,12 +3389,10 @@ void HandleButton(gb::platform::Button button,
         OpenSystem(db, ui, lib);
         return;
       }
-      if (button == gb::platform::Button::Y) {
-        OpenLaunchOptionsForSystem(db, ui, lib);
-        return;
-      }
       if (button == gb::platform::Button::B) {
-        lib.status = "PRESS START FOR MENU";
+        ui.menu_return_screen = gb::ui::Screen::Systems;
+        ui.screen = gb::ui::Screen::Home;
+        RefreshContinue(db, lib, ui);
         ui.needs_redraw = true;
         return;
       }
@@ -3205,39 +3433,10 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       if (button == gb::platform::Button::A) {
-        if (!lib.games.empty() && lib.pending_launch_game_id == 0) {
-          ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
-          lib.pending_launch_game_id = lib.games[lib.game_selected].id;
-          lib.status = "LAUNCHING...";
-          ui.needs_redraw = true;
-        }
-        return;
-      }
-      if (button == gb::platform::Button::X) {
         if (!lib.games.empty()) {
           ClampSelection(lib.game_selected, static_cast<int>(lib.games.size()));
-          const auto game_id = lib.games[lib.game_selected].id;
-          bool now_favorite = false;
-          if (db.ToggleGameFavorite(game_id, now_favorite)) {
-            lib.status = now_favorite ? "FAVORITE ON" : "FAVORITE OFF";
-            ReloadGameList(db, lib);
-            LoadSystems(db, lib);
-            if (lib.game_list_view == GameListView::System) {
-              RefreshSelectedGameDetails(db, lib);
-            }
-          } else {
-            lib.status = "FAVORITE TOGGLE FAILED";
-          }
-          ui.needs_redraw = true;
+          OpenGameMenu(db, ui, lib, args, lib.games[lib.game_selected].id);
         }
-        return;
-      }
-      if (button == gb::platform::Button::Y) {
-        OpenLaunchOptionsForGame(db, ui, lib);
-        return;
-      }
-      if (button == gb::platform::Button::R) {
-        OpenSelectedGameDetails(db, ui, lib);
         return;
       }
       if (button == gb::platform::Button::B) {
@@ -3330,13 +3529,13 @@ void HandleButton(gb::platform::Button button,
       }
       if (button == gb::platform::Button::Up) {
         lib.tools_exit_confirm = false;
-        lib.tools_selected = (lib.tools_selected + 10) % 11;
+        lib.tools_selected = (lib.tools_selected + 11) % 12;
         ui.needs_redraw = true;
         return;
       }
       if (button == gb::platform::Button::Down) {
         lib.tools_exit_confirm = false;
-        lib.tools_selected = (lib.tools_selected + 1) % 11;
+        lib.tools_selected = (lib.tools_selected + 1) % 12;
         ui.needs_redraw = true;
         return;
       }
@@ -3351,6 +3550,28 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       break;
+
+    case gb::ui::Screen::Update: {
+      const bool busy = UpdateIsBusy(lib.update_status);
+      if (button == gb::platform::Button::A && !busy) {
+        const bool available = lib.update_status.os_updates > 0 ||
+                               lib.update_status.shell_update;
+        StartUpdaterUnit(available ? "gamebird-update.service"
+                                   : "gamebird-update-check.service",
+                         lib.status);
+        lib.update_status.phase = available ? "STARTING" : "CHECKING";
+        lib.update_status.message = lib.status;
+        lib.update_status.progress = 0;
+        ui.needs_redraw = true;
+        return;
+      }
+      if (button == gb::platform::Button::B && !busy) {
+        ui.screen = gb::ui::Screen::Tools;
+        ui.needs_redraw = true;
+        return;
+      }
+      break;
+    }
 
     case gb::ui::Screen::InputSetup:
       if (button == gb::platform::Button::A) {
@@ -3798,6 +4019,7 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       if (button == gb::platform::Button::B) {
+        if (lib.launch_options_return_screen == gb::ui::Screen::GameMenu) RefreshGameMenu(db, lib, args);
         ui.screen = lib.launch_options_return_screen;
         ui.needs_redraw = true;
         return;
@@ -3805,51 +4027,8 @@ void HandleButton(gb::platform::Button button,
       break;
 
     case gb::ui::Screen::Details:
-      if (!lib.details_ready) {
-        if (button == gb::platform::Button::B) {
-          ui.screen = gb::ui::Screen::GameList;
-          ui.needs_redraw = true;
-        }
-        return;
-      }
-      if (button == gb::platform::Button::A && lib.pending_launch_game_id == 0) {
-        lib.pending_launch_game_id = lib.details.id;
-        lib.status = "LAUNCHING...";
-        ui.needs_redraw = true;
-        return;
-      }
-      if (button == gb::platform::Button::X) {
-        bool now_favorite = false;
-        if (db.ToggleGameFavorite(lib.details.id, now_favorite) &&
-            db.GetGameDetails(lib.details.id, lib.details)) {
-          lib.status = now_favorite ? "FAVORITE ON" : "FAVORITE OFF";
-          ReloadGameList(db, lib);
-          LoadSystems(db, lib);
-        } else {
-          lib.status = "FAVORITE TOGGLE FAILED";
-        }
-        ui.needs_redraw = true;
-        return;
-      }
-      if (button == gb::platform::Button::Y) {
-        bool now_hidden = false;
-        if (db.ToggleGameHidden(lib.details.id, now_hidden)) {
-          lib.status = now_hidden ? "HIDDEN" : "UNHIDDEN";
-          ReloadGameList(db, lib);
-          LoadSystems(db, lib);
-          ui.screen = gb::ui::Screen::GameList;
-        } else {
-          lib.status = "HIDE TOGGLE FAILED";
-        }
-        ui.needs_redraw = true;
-        return;
-      }
-      if (button == gb::platform::Button::Start) {
-        OpenLaunchOptionsForGame(db, ui, lib);
-        return;
-      }
-      if (button == gb::platform::Button::B) {
-        ui.screen = gb::ui::Screen::GameList;
+      if (button == gb::platform::Button::A || button == gb::platform::Button::B) {
+        ui.screen = gb::ui::Screen::GameMenu;
         ui.needs_redraw = true;
       }
       return;
@@ -4071,6 +4250,22 @@ void DrawTvModeOverlay(gb::render::Surface240& surface,
   }
 }
 
+void DrawUpdateNotice(gb::render::Surface240& surface,
+                      const gb::render::Theme& theme,
+                      const LibraryState& lib,
+                      const gb::ui::Screen screen) {
+  if (gb::core::NowMs() >= lib.update_notice_until_ms ||
+      screen == gb::ui::Screen::Update ||
+      (lib.update_status.os_updates <= 0 && !lib.update_status.shell_update)) {
+    return;
+  }
+  surface.FillRect(18, 154, 204, 58, theme.bg);
+  surface.StrokeRect(18, 154, 204, 58, theme.accent);
+  gb::ui::widgets::DrawText(surface, 50, 166, "UPDATE AVAILABLE", theme.accent, 1);
+  gb::ui::widgets::DrawText(surface, 34, 184, "GO TO TOOLS > SYSTEM UPDATE",
+                            theme.text, 1);
+}
+
 void DrawScreen(gb::render::Surface240& surface,
                 gb::ui::UIState& state,
                 const gb::render::Theme& theme,
@@ -4079,7 +4274,28 @@ void DrawScreen(gb::render::Surface240& surface,
   switch (state.screen) {
     case gb::ui::Screen::Home:
       gb::ui::screens::DrawHome(surface, state, theme);
+      gb::ui::widgets::DrawContentText(surface, 16, 198, lib.status, theme.text_dim);
       break;
+    case gb::ui::Screen::GameMenu: {
+      gb::ui::widgets::DrawMenuFrame(surface, theme, "GAME MENU");
+      gb::ui::widgets::DrawContentText(surface, 16, 38, lib.menu_game.title, theme.accent);
+      gb::ui::widgets::DrawContentText(surface, 16, 51, lib.menu_game.system_name, theme.text_dim);
+      std::vector<std::string> rows;
+      for (const auto& action : GameActions(lib)) rows.push_back(action.second);
+      gb::ui::widgets::DrawList(surface, 16, 68, 208, 126, 21, rows, lib.context_selected, theme);
+      gb::ui::widgets::DrawContentText(surface, 16, 198, lib.status, theme.text_dim);
+      gb::ui::widgets::DrawMenuFooter(surface, theme, "A:SELECT  B:BACK  START:BACK");
+      break;
+    }
+    case gb::ui::Screen::SystemMenu: {
+      gb::ui::widgets::DrawMenuFrame(surface, theme, "SYSTEM MENU");
+      const std::string title = lib.systems.empty() ? "No systems" : lib.systems[lib.system_selected].name;
+      gb::ui::widgets::DrawContentText(surface, 16, 40, title, theme.accent);
+      gb::ui::widgets::DrawList(surface, 16, 68, 208, 90, 30,
+          {"Browse games", "Launch options", "Main menu"}, lib.context_selected, theme);
+      gb::ui::widgets::DrawMenuFooter(surface, theme, "A:SELECT  B:BACK  START:BACK");
+      break;
+    }
     case gb::ui::Screen::Systems: {
       const auto cards = BuildSystemCards(lib);
       gb::ui::screens::DrawSystems(surface, theme, cards, lib.system_selected,
@@ -4136,12 +4352,16 @@ void DrawScreen(gb::render::Surface240& surface,
                                  lib.status);
       break;
     }
+    case gb::ui::Screen::Update: {
+      gb::ui::screens::DrawUpdate(
+          surface, theme, Ellipsize(lib.update_status.phase, 28),
+          lib.update_status.progress, lib.update_status.os_updates,
+          lib.update_status.shell_update, UpdateIsBusy(lib.update_status),
+          Ellipsize(lib.update_status.message, 30));
+      break;
+    }
     case gb::ui::Screen::LaunchOptions: {
-      surface.Clear(theme.bg);
-      surface.FillRect(8, 8, 224, 224, theme.panel);
-      surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-
-      gb::ui::widgets::DrawText(surface, 16, 18, "LAUNCH OPTIONS", theme.accent, 1);
+      gb::ui::widgets::DrawMenuFrame(surface, theme, "LAUNCH OPTIONS");
       gb::ui::widgets::DrawText(
           surface, 16, 32,
           std::string("Scope: ") +
@@ -4165,15 +4385,11 @@ void DrawScreen(gb::render::Surface240& surface,
         gb::ui::widgets::DrawText(surface, 16, 200, Ellipsize(lib.status, 31),
                                   theme.text_dim, 1);
       }
-      gb::ui::widgets::DrawText(surface, 16, 218,
-                                "L/R:ADJ A:NEXT X:PREV B:BACK", theme.text_dim, 1);
+      gb::ui::widgets::DrawMenuFooter(surface, theme, "L/R:ADJ A:NEXT X:PREV B:BACK");
       break;
     }
     case gb::ui::Screen::Bluetooth: {
-      surface.Clear(theme.bg);
-      surface.FillRect(8, 8, 224, 224, theme.panel);
-      surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-      gb::ui::widgets::DrawText(surface, 16, 18, "BLUETOOTH", theme.accent, 1);
+      gb::ui::widgets::DrawMenuFrame(surface, theme, "BLUETOOTH");
       gb::ui::widgets::DrawText(
           surface, 16, 30,
           std::string("TAB: ") + (lib.bluetooth_show_paired ? "PAIRED" : "SCANNED"),
@@ -4214,7 +4430,7 @@ void DrawScreen(gb::render::Surface240& surface,
               : (lib.bluetooth_show_paired
                      ? "<>:TAB R:ALL A:CON Y:DIS X:FORG B:BACK"
                      : "<>:TAB L/R:FILT A:PAIR X:SCAN Y:REF");
-      gb::ui::widgets::DrawText(surface, 16, 210, controls_hint, theme.text_dim, 1);
+      gb::ui::widgets::DrawMenuFooter(surface, theme, controls_hint);
 
       if (lib.bluetooth_modal != BluetoothModalType::None) {
         surface.FillRect(26, 84, 188, 72, theme.bg);
@@ -4255,10 +4471,7 @@ void DrawScreen(gb::render::Surface240& surface,
       break;
     }
     case gb::ui::Screen::InputSetup: {
-      surface.Clear(theme.bg);
-      surface.FillRect(8, 8, 224, 224, theme.panel);
-      surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-      gb::ui::widgets::DrawText(surface, 16, 18, "INPUT SETUP", theme.accent, 1);
+      gb::ui::widgets::DrawMenuFrame(surface, theme, "INPUT SETUP");
       gb::ui::widgets::DrawText(
           surface, 16, 34,
           lib.last_input_device.empty() ? "device: (none)"
@@ -4320,15 +4533,11 @@ void DrawScreen(gb::render::Surface240& surface,
       if (!lib.status.empty()) {
         gb::ui::widgets::DrawText(surface, 16, 188, lib.status, theme.text_dim, 1);
       }
-      gb::ui::widgets::DrawText(surface, 16, 210,
-                                "B:BACK  SELECT:HOME", theme.text_dim, 1);
+      gb::ui::widgets::DrawMenuFooter(surface, theme, "B:BACK  SELECT:HOME");
       break;
     }
     case gb::ui::Screen::InputTest: {
-      surface.Clear(theme.bg);
-      surface.FillRect(8, 8, 224, 224, theme.panel);
-      surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-      gb::ui::widgets::DrawText(surface, 16, 18, "LIVE INPUT TEST", theme.accent, 1);
+      gb::ui::widgets::DrawMenuFrame(surface, theme, "LIVE INPUT TEST");
       gb::ui::widgets::DrawText(
           surface, 16, 34,
           "Devices: " + std::to_string(lib.input_devices.size()) + "  Presses: " +
@@ -4351,7 +4560,7 @@ void DrawScreen(gb::render::Surface240& surface,
       }
       gb::ui::widgets::DrawText(surface, 16, 190,
                                 Ellipsize(lib.input_debug_line2, 30), theme.text_dim, 1);
-      gb::ui::widgets::DrawText(surface, 16, 216, "SELECT:BACK", theme.text_dim, 1);
+      gb::ui::widgets::DrawMenuFooter(surface, theme, "SELECT:BACK");
       break;
     }
   }
@@ -4371,9 +4580,10 @@ void DrawScreen(gb::render::Surface240& surface,
   }
   DrawBatteryHud(surface, theme, lib);
   DrawTvModeOverlay(surface, theme, lib);
+  DrawUpdateNotice(surface, theme, lib, state.screen);
 }
 
-int LaunchGameViaHelper(const Args& args, const int game_id, std::string& status) {
+int LaunchGameViaHelper(const Args& args, const int game_id, gb::core::PlayMode mode, std::string& status) {
   std::vector<std::string> launch_argv = {
       args.gblaunch,
       "--db",
@@ -4382,6 +4592,11 @@ int LaunchGameViaHelper(const Args& args, const int game_id, std::string& status
       std::to_string(game_id),
   };
 
+  launch_argv.push_back(mode == gb::core::PlayMode::Resume ? "--resume" :
+                        mode == gb::core::PlayMode::Backup ? "--resume-backup" : "--fresh");
+  const auto receipt_path = gb::core::PlayResultPath(args.db_path, game_id);
+  std::error_code receipt_error;
+  std::filesystem::remove(receipt_path, receipt_error);
   const auto result = gb::platform::RunProcessBlocking(launch_argv);
   if (!result.launched) {
     status = "LAUNCH FAILED";
@@ -4395,7 +4610,10 @@ int LaunchGameViaHelper(const Args& args, const int game_id, std::string& status
     return result.exit_code;
   }
 
-  status = "EXIT " + std::to_string(result.exit_code);
+  status = result.exit_code == 0 ? "Returned to menu" : "Launch failed - previous save kept";
+  std::ifstream receipt(receipt_path);
+  std::string outcome;
+  if (std::getline(receipt, outcome) && !outcome.empty()) status = outcome;
   return result.exit_code;
 }
 
@@ -4589,6 +4807,9 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
   const gb::render::Theme theme = gb::render::DefaultTheme();
   gb::ui::UIState state;
   state.show_diagnostics = lib.settings.show_diagnostics;
+  RefreshContinue(db, lib, state);
+  state.home_selected = state.continue_available ? 0 : 1;
+  state.menu_return_screen = lib.browse.screen == "games" ? gb::ui::Screen::GameList : gb::ui::Screen::Systems;
   if (lib.tv_mode) {
     lib.tv_mode_notice_until_ms = gb::core::NowMs() + 3000;
   }
@@ -4741,8 +4962,25 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
       }
     }
 
+    RememberBrowse(lib, state);
+    if (lib.browse != lib.saved_browse) {
+      if (lib.browse_changed_ms == 0) lib.browse_changed_ms = gb::core::NowMs();
+      if (gb::core::NowMs() - lib.browse_changed_ms >= 1000) {
+        std::string error;
+        if (gb::core::SaveBrowseState(args.db_path, lib.browse, error)) lib.saved_browse = lib.browse;
+        else gb::core::Log(gb::core::LogLevel::Warn, "Browse position: " + error);
+        lib.browse_changed_ms = gb::core::NowMs();
+      }
+    } else lib.browse_changed_ms = 0;
+
     UpdateBatteryHud(battery, state, lib);
     UpdateTvModeState(state, lib);
+    const auto update_now_ms = gb::core::NowMs();
+    if (lib.update_last_read_ms == 0 ||
+        update_now_ms - lib.update_last_read_ms >= 1000) {
+      if (ReadUpdateStatus(lib)) state.needs_redraw = true;
+      lib.update_last_read_ms = update_now_ms;
+    }
 
     // gblibd discovers ROMs copied over Samba in the background. Refresh the
     // visible catalog as well, so uploads appear without restarting the shell
@@ -4750,6 +4988,9 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
     const auto library_now_ms = gb::core::NowMs();
     if (library_now_ms >= next_library_refresh_ms) {
       const auto before = LibraryUiSignature(lib);
+      const auto continue_before = state.continue_title;
+      RefreshContinue(db, lib, state);
+      if (continue_before != state.continue_title) state.needs_redraw = true;
       LoadSystems(db, lib);
       if (state.screen == gb::ui::Screen::GameList) {
         ReloadGameList(db, lib);
@@ -4844,8 +5085,14 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
       const int game_id = lib.pending_launch_game_id;
       lib.pending_launch_game_id = 0;
 
+      std::string browse_error;
+      if (gb::core::SaveBrowseState(args.db_path, lib.browse, browse_error)) lib.saved_browse = lib.browse;
       std::string launch_status;
       launch_game(game_id, launch_status);
+      RefreshContinue(db, lib, state);
+      RefreshGameMenu(db, lib, args);
+      lib.context_selected = 0;
+      state.screen = gb::ui::Screen::GameMenu;
       lib.status = launch_status;
       lib.ignore_input_until_ms = gb::core::NowMs() + kPostLaunchInputBlockMs;
       ReloadGameList(db, lib);
@@ -4891,6 +5138,12 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
     ++state.frame_count;
   }
 
+  RememberBrowse(lib, state);
+  if (lib.browse != lib.saved_browse) {
+    std::string error;
+    if (!gb::core::SaveBrowseState(args.db_path, lib.browse, error))
+      gb::core::Log(gb::core::LogLevel::Warn, "Browse position: " + error);
+  }
   return 0;
 }
 
@@ -4937,7 +5190,7 @@ int RunSdl(const Args& args, gb::db::Database& db, LibraryState& lib) {
           gb::core::Log(gb::core::LogLevel::Warn,
                         "battery overlay config failed: " + error);
         }
-        return LaunchGameViaHelper(args, game_id, status);
+        return LaunchGameViaHelper(args, game_id, lib.pending_play_mode, status);
       },
       [&](std::string& status) {
         std::string error;
@@ -5011,7 +5264,7 @@ int RunFbdev(const Args& args, gb::db::Database& db, LibraryState& lib) {
                         "battery overlay config failed: " + error);
         }
         input.ReleaseDeviceGrabs();
-        const int rc = LaunchGameViaHelper(args, game_id, status);
+        const int rc = LaunchGameViaHelper(args, game_id, lib.pending_play_mode, status);
         input.AcquireDeviceGrabs();
         return rc;
       },
@@ -5076,7 +5329,16 @@ int main(int argc, char** argv) {
   } else {
     lib.db_ready = true;
     LoadSystems(db, lib);
-    SelectGameBirdSystem(lib);
+    gb::core::LoadBrowseState(args.db_path, lib.browse);
+    lib.saved_browse = lib.browse;
+    const auto saved = std::find_if(lib.systems.begin(), lib.systems.end(),
+        [&](const auto& system) { return system.id == lib.browse.system_id; });
+    if (saved != lib.systems.end()) lib.system_selected = static_cast<int>(saved - lib.systems.begin());
+    else SelectGameBirdSystem(lib);
+    const auto restored_view = lib.browse.view;
+    SelectSystem(db, lib, lib.system_selected);
+    if (restored_view == "recent") { lib.game_list_view = GameListView::Recent; LoadRecentGames(db, lib); }
+    else if (restored_view == "favorites") { lib.game_list_view = GameListView::Favorites; LoadFavoriteGames(db, lib); }
     const auto unavailable = std::count_if(
         lib.library_roots.begin(), lib.library_roots.end(),
         [](const gb::db::LibraryRootState& root) { return root.status != "ok"; });

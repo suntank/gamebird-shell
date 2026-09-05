@@ -11,6 +11,8 @@ enum class Screen {
   Home,
   Systems,
   GameList,
+  GameMenu,
+  SystemMenu,
   Details,
   Settings,
   ScrapeProgress,
@@ -19,13 +21,15 @@ enum class Screen {
   InputTest,
   Bluetooth,
   Wifi,
+  Update,
   LaunchOptions,
 };
 
 struct UIState {
-  // The console carousel is the shell's home surface. The Home screen is
-  // the compact Start menu, opened and closed with Start.
-  Screen screen = Screen::Systems;
+  Screen screen = Screen::Home;
+  Screen menu_return_screen = Screen::Systems;
+  std::string continue_title;
+  bool continue_available = false;
   int home_selected = 0;
   std::string list_context = "Recent";
   bool running = true;

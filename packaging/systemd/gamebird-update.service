@@ -1,0 +1,14 @@
+[Unit]
+Description=Install Raspberry Pi OS and GameBird Shell updates
+After=network-online.target data.mount
+Wants=network-online.target
+ConditionPathIsMountPoint=/data
+Conflicts=gamebird-update-check.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/gamebird/gamebird-updater install
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=infinity

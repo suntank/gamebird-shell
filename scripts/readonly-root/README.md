@@ -33,10 +33,8 @@ OverlayFS reconfiguration while retaining the stock helper whenever the system
 boots without an overlay. Without `recurse=0`, overlayroot also converts the
 data partition into a temporary overlay, defeating persistence.
 
-To perform OS or shell software updates, disable overlay mode and reboot first:
-
-```sh
-sudo mount -o remount,rw /boot/firmware
-sudo raspi-config nonint do_overlayfs 1
-sudo reboot
-```
+The GameBird system updater performs OS and shell updates directly against the
+protected lower root with `overlayroot-chroot`, restores the read-only mounts,
+and reboots after success. Use **Tools -> System Update** for normal updates.
+Disabling overlay mode is only needed for manual recovery or maintenance that
+the updater does not support.

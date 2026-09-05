@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/launch_config.h"
+#include "core/play_session.h"
 #include "core/logging.h"
 #include "db/db.h"
 #include "platform/proc.h"
@@ -20,6 +21,7 @@ struct Args {
   bool dry_run = false;
   bool show_effective = false;
   bool validate_all = false;
+  gb::core::PlayMode play_mode = gb::core::PlayMode::Fresh;
 };
 
 Args ParseArgs(const int argc, char** argv) {
@@ -36,6 +38,9 @@ Args ParseArgs(const int argc, char** argv) {
       out.game_id = std::atoi(argv[++i]);
       continue;
     }
+    if (arg == "--resume") { out.play_mode = gb::core::PlayMode::Resume; continue; }
+    if (arg == "--resume-backup") { out.play_mode = gb::core::PlayMode::Backup; continue; }
+    if (arg == "--fresh") { out.play_mode = gb::core::PlayMode::Fresh; continue; }
     if (arg == "--dry-run") {
       out.dry_run = true;
       continue;
@@ -241,7 +246,7 @@ int main(int argc, char** argv) {
   if (args.game_id <= 0 && !args.validate_all) {
     gb::core::Log(gb::core::LogLevel::Error,
                   "usage: gblaunch --db <path> (--game-id <id> [--dry-run] "
-                  "[--show-effective] | --validate-all)");
+                  "[--show-effective] [--fresh|--resume|--resume-backup] | --validate-all)");
     return 2;
   }
 
@@ -282,8 +287,7 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (!override_append_cfg_path.empty()) {
-      cmd_argv.push_back("--appendconfig");
-      cmd_argv.push_back(override_append_cfg_path);
+      gb::core::AppendRetroArchConfig(cmd_argv, override_append_cfg_path);
     }
   }
 
@@ -294,6 +298,13 @@ int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::remove(override_append_cfg_path, ec);
   };
+
+  gb::core::PlaySession session;
+  if (!args.dry_run && !session.Prepare(args.db_path, effective, args.play_mode, cmd_argv, build_error)) {
+    gb::core::Log(gb::core::LogLevel::Error, "session preparation failed: " + build_error);
+    cleanup_override_append();
+    return 1;
+  }
 
   if (args.dry_run) {
     std::string joined;
@@ -320,7 +331,19 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (!db.UpdateLastPlayed(effective.info.game_id, NowUnixSeconds())) {
+  std::string session_status;
+  session.Finish(result.exited_normally && result.exit_code == 0, session_status);
+  {
+    const auto path = gb::core::PlayResultPath(args.db_path, effective.info.game_id);
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream receipt(path);
+    receipt << session_status << '\n';
+  }
+  gb::core::Log(gb::core::LogLevel::Info, session_status);
+
+  if (result.exited_normally && result.exit_code == 0 &&
+      !db.UpdateLastPlayed(effective.info.game_id, NowUnixSeconds())) {
     gb::core::Log(gb::core::LogLevel::Warn,
                   "failed to update last_played: " + db.LastError());
   }

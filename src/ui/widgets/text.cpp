@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "ui/widgets/text.h"
 
 #include <array>
@@ -226,6 +227,66 @@ const Glyph& LookupGlyph(char c) {
       static const Glyph g = {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x08};
       return g;
     }
+    case '%': {
+      static const Glyph g = {0x19, 0x19, 0x2, 0x4, 0x8, 0x13, 0x13};
+      return g;
+    }
+    case '!': {
+      static const Glyph g = {0x4, 0x4, 0x4, 0x4, 0x4, 0x0, 0x4};
+      return g;
+    }
+    case '@': {
+      static const Glyph g = {0xe, 0x11, 0x17, 0x15, 0x17, 0x10, 0xe};
+      return g;
+    }
+    case '#': {
+      static const Glyph g = {0xa, 0x1f, 0xa, 0xa, 0x1f, 0xa, 0x0};
+      return g;
+    }
+    case '$': {
+      static const Glyph g = {0x4, 0xf, 0x14, 0xe, 0x5, 0x1e, 0x4};
+      return g;
+    }
+    case '^': {
+      static const Glyph g = {0x4, 0xa, 0x11, 0x0, 0x0, 0x0, 0x0};
+      return g;
+    }
+    case '&': {
+      static const Glyph g = {0xc, 0x12, 0x14, 0x8, 0x15, 0x12, 0xd};
+      return g;
+    }
+    case '{': {
+      static const Glyph g = {0x3, 0x4, 0x4, 0x8, 0x4, 0x4, 0x3};
+      return g;
+    }
+    case '}': {
+      static const Glyph g = {0x18, 0x4, 0x4, 0x2, 0x4, 0x4, 0x18};
+      return g;
+    }
+    case '?': {
+      static const Glyph g = {0xe, 0x11, 0x1, 0x2, 0x4, 0x0, 0x4};
+      return g;
+    }
+    case '|': {
+      static const Glyph g = {0x4, 0x4, 0x4, 0x4, 0x4, 0x4, 0x4};
+      return g;
+    }
+    case '~': {
+      static const Glyph g = {0x0, 0x0, 0x9, 0x16, 0x0, 0x0, 0x0};
+      return g;
+    }
+    case '`': {
+      static const Glyph g = {0x8, 0x4, 0x0, 0x0, 0x0, 0x0, 0x0};
+      return g;
+    }
+    case '\'': {
+      static const Glyph g = {0x4, 0x4, 0x8, 0x0, 0x0, 0x0, 0x0};
+      return g;
+    }
+    case '"': {
+      static const Glyph g = {0xa, 0xa, 0x0, 0x0, 0x0, 0x0, 0x0};
+      return g;
+    }
     case ' ': {
       return blank;
     }
@@ -246,7 +307,14 @@ void DrawText(render::Surface240& surface,
               const std::string_view text,
               const std::uint16_t color,
               const int scale) {
-  for (const char c : text) {
+  if (scale <= 0) return;
+  const int available = std::max(0, (surface.Width() - x) / (6 * scale));
+  const bool truncated = static_cast<int>(text.size()) > available;
+  int index = 0;
+  for (const char original : text) {
+    if (index >= available) break;
+    const char c = truncated && available >= 3 && index >= available - 3 ? '.' : original;
+    ++index;
     const Glyph& glyph = LookupGlyph(c);
     for (int row = 0; row < 7; ++row) {
       for (int col = 0; col < 5; ++col) {

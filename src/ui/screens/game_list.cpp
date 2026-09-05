@@ -5,6 +5,7 @@
 #include "render/image_cache.h"
 #include "ui/widgets/list.h"
 #include "ui/widgets/text.h"
+#include "ui/widgets/chrome.h"
 
 namespace gb::ui::screens {
 namespace {
@@ -26,7 +27,7 @@ void DrawCenteredText(render::Surface240& surface,
                       const std::uint16_t color,
                       const int scale = 1) {
   const int width = widgets::MeasureTextWidth(text, scale);
-  widgets::DrawText(surface, std::max(0, (surface.Width() - width) / 2), y, text,
+  widgets::DrawContentText(surface, std::max(0, (surface.Width() - width) / 2), y, text,
                     color, scale);
 }
 
@@ -38,18 +39,15 @@ void DrawGameList(render::Surface240& surface,
                   const std::vector<std::string>& games,
                   const int selected,
                   const std::string& status) {
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 224, theme.panel);
-  surface.StrokeRect(8, 8, 224, 224, theme.panel_border);
-  widgets::DrawText(surface, 16, 18, title, theme.accent, 1);
-  widgets::DrawList(surface, 16, 40, 208, 154, 18, games, selected, theme);
+  widgets::DrawMenuFrame(surface, theme, title);
+  widgets::DrawList(surface, 16, 40, 208, 150, 24, games, selected, theme);
   if (games.empty()) {
-    widgets::DrawText(surface, 16, 80, "NO GAMES FOUND", theme.text_dim, 1);
+    widgets::DrawContentText(surface, 16, 80, "NO GAMES FOUND", theme.text_dim, 1);
   }
   if (!status.empty()) {
-    widgets::DrawText(surface, 16, 196, status, theme.text_dim, 1);
+    widgets::DrawContentText(surface, 16, 196, status, theme.text_dim, 1);
   }
-  widgets::DrawText(surface, 16, 210, "A:RUN R:INFO X:FAV Y:OPTIONS", theme.text_dim, 1);
+  widgets::DrawMenuFooter(surface, theme, "A:OPEN  B:BACK  START:MENU");
 }
 
 void DrawGameBrowser(render::Surface240& surface,
@@ -59,11 +57,9 @@ void DrawGameBrowser(render::Surface240& surface,
                      const int selected,
                      const std::string& box_art_path,
                      const std::string& status) {
-  surface.Clear(theme.bg);
-  surface.FillRect(4, 4, 232, 232, theme.panel);
-  surface.StrokeRect(4, 4, 232, 232, theme.panel_border);
+  widgets::DrawMenuFrame(surface, theme, system_name);
 
-  constexpr render::Rect art_bounds{6, 6, 228, 182};
+  constexpr render::Rect art_bounds{16, 34, 208, 130};
   static render::ImageCache image_cache(10);
   std::string artwork_error;
   const auto* artwork = image_cache.LoadPng(box_art_path, artwork_error);
@@ -77,13 +73,9 @@ void DrawGameBrowser(render::Surface240& surface,
     DrawCenteredText(surface, 96, "NO ART", theme.text_dim, 2);
   }
 
-  surface.FillRect(7, 7, 226, 15, theme.panel);
-  const std::string heading = "< " + FitText(system_name, 29) + " >";
-  DrawCenteredText(surface, 11, heading, theme.accent);
-
-  surface.FillRect(5, 190, 230, 45, theme.bg);
+  widgets::DrawMenuFooter(surface, theme, "A:OPEN  B:BACK  START:MENU");
   if (games.empty()) {
-    DrawCenteredText(surface, 207, "NO GAMES FOUND", theme.text_dim);
+    DrawCenteredText(surface, 185, "NO GAMES FOUND", theme.text_dim);
     return;
   }
 
@@ -91,14 +83,15 @@ void DrawGameBrowser(render::Surface240& surface,
   const int previous =
       (current + static_cast<int>(games.size()) - 1) % games.size();
   const int next = (current + 1) % games.size();
-  DrawCenteredText(surface, 192, FitText(games[previous], 34), theme.text_dim);
-  surface.FillRect(8, 203, 224, 15, theme.panel_border);
-  DrawCenteredText(surface, 207, FitText(games[current], 34), theme.text);
-  DrawCenteredText(surface, 223, FitText(games[next], 34), theme.text_dim);
+  DrawCenteredText(surface, 169, FitText(games[previous], 34), theme.text_dim);
+  surface.FillRect(16, 181, 208, 15, theme.panel_border);
+  surface.FillRect(16, 181, 3, 15, theme.accent);
+  DrawCenteredText(surface, 185, FitText(games[current], 34), theme.text);
+  DrawCenteredText(surface, 200, FitText(games[next], 34), theme.text_dim);
 
   if (!status.empty()) {
-    surface.FillRect(8, 222, 224, 11, theme.panel);
-    DrawCenteredText(surface, 224, FitText(status, 34), theme.accent);
+    surface.FillRect(16, 198, 208, 9, theme.panel);
+    DrawCenteredText(surface, 200, FitText(status, 34), theme.accent);
   }
 }
 

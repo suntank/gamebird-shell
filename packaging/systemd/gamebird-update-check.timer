@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically check for GameBird updates
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=6h
+RandomizedDelaySec=15s
+Persistent=true
+Unit=gamebird-update-check.service
+
+[Install]
+WantedBy=timers.target

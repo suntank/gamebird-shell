@@ -1,0 +1,4 @@
+# GameBird Shell may only start the two fixed updater units. The updater
+# payload and units remain root-owned and are not writable through Samba.
+gamebird ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block start gamebird-update-check.service
+gamebird ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block start gamebird-update.service
