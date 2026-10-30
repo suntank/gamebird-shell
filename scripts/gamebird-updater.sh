@@ -70,6 +70,10 @@ field() {
 apt_options=(
   -o "Dir::State::lists=$apt_lists"
   -o "APT::Get::List-Cleanup=0"
+  # Binary package caches can exhaust the handheld's small root overlay even
+  # during a read-only update check. Parse the persistent lists directly.
+  -o "Dir::Cache::pkgcache="
+  -o "Dir::Cache::srcpkgcache="
 )
 
 check_updates() {
@@ -151,8 +155,11 @@ install_shell_payload() {
     "$remote_commit"
   # Native Nest downloads and verifies packages in-process. Existing consoles
   # need these development libraries before building their first native version.
+  # Python games use the system interpreter; provide the standard game runtime
+  # here so installing a Nest package does not require a separate pip step.
   apt-get "${apt_options[@]}" -y --no-install-recommends install \
     libcurl4-openssl-dev libssl-dev libarchive-dev libjpeg-dev ca-certificates \
+    python3-pygame \
     >>"$log_file" 2>&1
   rm -rf "$build_dir"
   cmake -S "$source_dir" -B "$build_dir" -DBUILD_TESTING=OFF \

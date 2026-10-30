@@ -223,6 +223,15 @@ class UpdaterTest(unittest.TestCase):
         self.assertFalse((self.state / "installed-shell-commit").exists())
         self.assertFalse(self.commands.exists())
 
+    def test_missing_game_runtime_stops_before_build_and_receipt(self):
+        self.mock("apt-get", '[[ " $* " == *" python3-pygame "* ]] && exit 49; exit 0')
+        self.mock("cmake", f'echo build >> "{self.commands}"')
+        result = self.run_updater("inner", "0", "1", "a" * 40, str(self.root / "source"))
+        self.assertEqual(result.returncode, 49, result.stderr)
+        self.assertEqual(self.status()["phase"], "ERROR")
+        self.assertFalse((self.shell / "build/shell-commit").exists())
+        self.assertFalse(self.commands.exists())
+
     def test_failed_chroot_does_not_reboot(self):
         self.prepare_install()
         self.mock("overlayroot-chroot", "exit 43")

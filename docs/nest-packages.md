@@ -44,8 +44,10 @@ links, and unsupported archive file types are rejected. A ZIP nested under
 `game/` or a title folder is rejected because its root has no `game.json`.
 
 GameBird runs Python packages as `python3 -u <entrypoint> <args...>`. Python 3
-and any modules the game imports (such as Pygame) must already be available on
-the device. Nest does not execute dependency installation scripts or run pip.
+and any modules the game imports must already be available on the device.
+The GameBird system updater installs `python3-pygame` for Pygame games. Older
+images need that system package installed in their persistent root before
+launching them. Nest does not execute dependency installation scripts or run pip.
 
 Keep the title, store version, screenshots, and download information in the
 existing store API metadata; they do not need to be repeated in `game.json`.
