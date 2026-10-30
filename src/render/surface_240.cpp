@@ -62,7 +62,8 @@ void Surface240::BlitScaled(const std::uint16_t* source,
                             const int x,
                             const int y,
                             const int width,
-                            const int height) {
+                            const int height,
+                            const std::uint8_t* alpha) {
   if (source == nullptr || source_width <= 0 || source_height <= 0 || width <= 0 ||
       height <= 0) {
     return;
@@ -80,8 +81,17 @@ void Surface240::BlitScaled(const std::uint16_t* source,
     for (int dst_x = x0; dst_x < x1; ++dst_x) {
       const int src_x = std::min(source_width - 1,
                                  ((dst_x - x) * source_width) / width);
-      pixels_[dst_y * kSurfaceWidth + dst_x] =
-          source[src_y * source_width + src_x];
+      const auto index = src_y * source_width + src_x;
+      auto& destination = pixels_[dst_y * kSurfaceWidth + dst_x];
+      if (alpha == nullptr || alpha[index] == 255) {
+        destination = source[index];
+      } else if (alpha[index] != 0) {
+        const auto blend = [&](const int shift, const int mask) {
+          return ((((source[index] >> shift) & mask) * alpha[index] +
+                   ((destination >> shift) & mask) * (255 - alpha[index]) + 127) / 255) << shift;
+        };
+        destination = static_cast<std::uint16_t>(blend(11, 31) | blend(5, 63) | blend(0, 31));
+      }
     }
   }
   MarkDirty(x0, y0, x1 - x0, y1 - y0);

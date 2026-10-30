@@ -6,7 +6,7 @@ the theme's `gamebird` pair is named `apps-icon.png` and `apps-logo.png` to matc
 the shell's native apps system. No additional systems are enabled.
 
 GameBird Shell changes the presentation: it fits the visible artwork bounds,
-composites transparency against the UI, places controllers on a light tile,
+composites transparency against the UI wallpaper,
 and reuses the GameBird console image for Nest's bird mark. The artwork remains
 under the original terms below; this notice covers these artwork files.
 

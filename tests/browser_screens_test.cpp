@@ -10,6 +10,8 @@
 
 #include "render/surface_240.h"
 #include "render/theme.h"
+#include "render/assets.h"
+#include "render/image_cache.h"
 #include "ui/screens/home.h"
 #include "ui/widgets/list.h"
 #include "ui/widgets/chrome.h"
@@ -74,6 +76,24 @@ int main() {
       0, "");
   Expect(surface.Pixels()[52 * 240 + 66] == theme.panel_border,
          "missing system icon draws console fallback");
+
+  gb::render::ImageCache wallpaper(1);
+  std::string image_error;
+  const auto* background = wallpaper.LoadPng(
+      gb::render::BundledAsset("ui/systemback.png").string(), image_error);
+  Expect(background && image_error.empty(), "bundled systemback wallpaper loads");
+  gb::render::Surface240 backdrop;
+  gb::render::DrawThemeBackground(backdrop, theme);
+  gb::ui::screens::DrawSystems(surface, theme,
+      {{"Super Nintendo", 3,
+        gb::render::BundledSystemArt("snes-icon.png").string(),
+        gb::render::BundledSystemArt("snes-logo.png").string()}}, 0, "");
+  Expect(surface.Pixels()[36 * 240 + 68] == backdrop.Pixels()[36 * 240 + 68] &&
+             surface.Pixels()[140 * 240 + 28] == backdrop.Pixels()[140 * 240 + 28],
+         "console and logo letterboxing retain the full-screen wallpaper");
+  Expect(background && surface.Pixels()[0] == background->pixels[0] &&
+             surface.Pixels()[239 * 240 + 239] == background->pixels.back(),
+         "systemback fills the entire screen including its corners");
 
   gb::ui::screens::DrawGameBrowser(
       surface, theme, "Super Nintendo",

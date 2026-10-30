@@ -66,11 +66,14 @@ int main(int argc, char** argv) {
   using Work = decltype(s.working);
   const auto theme = gb::render::DefaultTheme();
   gb::render::Surface240 surface;
+  gb::render::Surface240 backdrop;
+  gb::render::DrawThemeBackground(backdrop, theme);
   auto draw = [&](const std::string& name) {
     controller.Draw(surface, theme);
     bool margins = true;
     for (int y = 0; y < 240; ++y)
-      for (const int x : {0, 1, 238, 239}) margins &= surface.Pixels()[y * 240 + x] == theme.bg;
+      for (const int x : {0, 1, 238, 239})
+        margins &= surface.Pixels()[y * 240 + x] == backdrop.Pixels()[y * 240 + x];
     Expect(margins, "screen rendering stays inside shell margins");
     Save(previews, name, surface);
   };
@@ -110,7 +113,8 @@ int main(int argc, char** argv) {
   draw("02-nest-catalog");
   Expect(surface.Pixels()[155 * 240 + 16] == theme.accent, "catalog highlights selected game");
   bool footer_gap_clear = true;
-  for (int x = 16; x < 224; ++x) footer_gap_clear &= surface.Pixels()[220 * 240 + x] == theme.panel;
+  for (int x = 16; x < 224; ++x)
+    footer_gap_clear &= surface.Pixels()[220 * 240 + x] == backdrop.Pixels()[220 * 240 + x];
   Expect(footer_gap_clear, "two-line controls do not overlap a previously drawn footer");
   controller.HandleButton(Button::Right);
   Expect(s.screenshot == 1, "right opens a game screenshot");

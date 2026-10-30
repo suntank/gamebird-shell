@@ -301,7 +301,9 @@ data/system-art/<system-id>-logo.png
 ```
 
 Both are aspect-fitted PNGs with transparency preserved; transparent padding is
-trimmed when fitting system art. Controller silhouettes appear on a light tile.
+trimmed when fitting system art. Consoles and logos blend directly into the
+full-screen `assets/ui/systemback.png` wallpaper. All menus use this blue theme
+with white labels and brighter blue controls.
 Systems without bundled or custom artwork use a built-in console icon or the
 system name. Nest also uses the bundled GameBird bird. Artwork attribution and
 license terms are in `assets/system-art/SOURCE.md`.

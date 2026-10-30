@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,7 +43,7 @@ class ImageCache {
 void BlitImageFit(Surface240& surface,
                   const CachedImage& image,
                   Rect bounds,
-                  std::uint16_t background,
+                  std::optional<std::uint16_t> background,
                   bool trim_transparent = false);
 
 }  // namespace gb::render

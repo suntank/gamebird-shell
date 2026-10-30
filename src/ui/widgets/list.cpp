@@ -36,10 +36,9 @@ void DrawList(render::Surface240& surface,
     const int row_y = y + row * item_h;
     const bool active = (item_index == current);
 
-    const auto bg = active ? theme.accent : theme.panel;
-    const auto fg = active ? theme.bg : theme.text;
+    const auto fg = theme.text;
 
-    surface.FillRect(x, row_y, w, item_h - 2, bg);
+    if (active) surface.FillRect(x, row_y, w, item_h - 2, theme.accent);
     if (!active) surface.FillRect(x + 8, row_y + item_h - 3, w - 16, 1, theme.panel_border);
     DrawText(surface, x + 8, row_y + (item_h - 9) / 2,
              FitLabel(items[item_index], w - 28), fg, 1);

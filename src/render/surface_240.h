@@ -41,7 +41,8 @@ class Surface240 {
                   int x,
                   int y,
                   int width,
-                  int height);
+                  int height,
+                  const std::uint8_t* alpha = nullptr);
 
   void ClearDirtyRects();
   [[nodiscard]] const std::vector<Rect>& DirtyRects() const;

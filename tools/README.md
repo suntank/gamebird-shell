@@ -20,8 +20,9 @@ The output contains PPM images for browsing, settings, tools, details, progress,
 and all Wi-Fi views. Fixtures use sample data and do not change saved settings.
 
 Menus share `src/ui/widgets/chrome.h`: 16-pixel content margins, a compact
-header, a separated control footer, and a common progress bar. Lists use mint
-selection highlights, vertically centered labels, and a scroll-position marker.
+header, a separated control footer, and a common progress bar. All menus use the
+bundled systemback wallpaper with white labels. Lists use blue selection
+highlights, vertically centered labels, and a scroll-position marker.
 
 To render the new Continue, game menu, and system menu using the actual shell
 router and an isolated fixture catalog, build with tests enabled and run:

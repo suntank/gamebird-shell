@@ -119,6 +119,14 @@ int main() {
     gb::render::BlitImageFit(surface, *image, {10, 10, 20, 20}, background, true);
     Expect(surface.Pixels()[10 * 240 + 10] == blended,
            "optional trimming fits visible artwork without transparent padding");
+    const auto red = gb::render::Rgb565(255, 0, 0);
+    surface.Clear(red);
+    surface.FillRect(20, 15, 10, 10, background);
+    gb::render::BlitImageFit(surface, *image, {10, 10, 20, 20}, std::nullopt);
+    Expect(surface.Pixels()[15 * 240 + 10] == red &&
+               surface.Pixels()[15 * 240 + 20] == blended &&
+               surface.Pixels()[10 * 240 + 20] == red,
+           "overlay alpha blends per destination pixel and preserves surrounding wallpaper");
   }
 
   // The store cache names every image .png, so signature detection is required.

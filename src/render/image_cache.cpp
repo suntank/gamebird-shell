@@ -269,44 +269,41 @@ void ImageCache::Clear() { entries_.clear(); }
 void BlitImageFit(Surface240& surface,
                   const CachedImage& image,
                   const Rect bounds,
-                  const std::uint16_t background,
+                  const std::optional<std::uint16_t> background,
                   const bool trim_transparent) {
-  surface.FillRect(bounds.x, bounds.y, bounds.w, bounds.h, background);
+  if (background) surface.FillRect(bounds.x, bounds.y, bounds.w, bounds.h, *background);
   if (image.width <= 0 || image.height <= 0 || image.pixels.empty() || bounds.w <= 0 ||
       bounds.h <= 0) {
     return;
   }
   Rect source{0, 0, image.width, image.height};
-  std::vector<std::uint16_t> composited;
+  std::vector<std::uint16_t> cropped_pixels;
+  std::vector<std::uint8_t> cropped_alpha;
   const auto* pixels = image.pixels.data();
-  if (!image.alpha.empty()) {
-    if (trim_transparent) {
-      int left = image.width, top = image.height, right = -1, bottom = -1;
-      for (int y = 0; y < image.height; ++y) {
-        for (int x = 0; x < image.width; ++x) {
-          if (image.alpha[static_cast<std::size_t>(y) * image.width + x] == 0) continue;
-          left = std::min(left, x); top = std::min(top, y);
-          right = std::max(right, x); bottom = std::max(bottom, y);
-        }
+  const auto* alpha = image.alpha.empty() ? nullptr : image.alpha.data();
+  if (alpha && trim_transparent) {
+    int left = image.width, top = image.height, right = -1, bottom = -1;
+    for (int y = 0; y < image.height; ++y) {
+      for (int x = 0; x < image.width; ++x) {
+        if (image.alpha[static_cast<std::size_t>(y) * image.width + x] == 0) continue;
+        left = std::min(left, x); top = std::min(top, y);
+        right = std::max(right, x); bottom = std::max(bottom, y);
       }
-      if (right < left) return;
-      source = {left, top, right - left + 1, bottom - top + 1};
     }
-    composited.resize(static_cast<std::size_t>(source.w) * source.h);
+    if (right < left) return;
+    source = {left, top, right - left + 1, bottom - top + 1};
+    cropped_pixels.resize(static_cast<std::size_t>(source.w) * source.h);
+    cropped_alpha.resize(cropped_pixels.size());
     for (int y = 0; y < source.h; ++y) {
       for (int x = 0; x < source.w; ++x) {
         const auto index = static_cast<std::size_t>(y + source.y) * image.width + x + source.x;
-        const auto pixel = image.pixels[index];
-        const int alpha = image.alpha[index];
-        const auto blend = [&](const int shift, const int mask) {
-          return ((((pixel >> shift) & mask) * alpha +
-                   ((background >> shift) & mask) * (255 - alpha) + 127) / 255) << shift;
-        };
-        composited[static_cast<std::size_t>(y) * source.w + x] =
-            static_cast<std::uint16_t>(blend(11, 31) | blend(5, 63) | blend(0, 31));
+        const auto destination = static_cast<std::size_t>(y) * source.w + x;
+        cropped_pixels[destination] = image.pixels[index];
+        cropped_alpha[destination] = image.alpha[index];
       }
     }
-    pixels = composited.data();
+    pixels = cropped_pixels.data();
+    alpha = cropped_alpha.data();
   }
   const double scale = std::min(static_cast<double>(bounds.w) / source.w,
                                 static_cast<double>(bounds.h) / source.h);
@@ -314,7 +311,7 @@ void BlitImageFit(Surface240& surface,
   const int height = std::max(1, static_cast<int>(source.h * scale));
   surface.BlitScaled(pixels, source.w, source.h,
                      bounds.x + (bounds.w - width) / 2,
-                     bounds.y + (bounds.h - height) / 2, width, height);
+                     bounds.y + (bounds.h - height) / 2, width, height, alpha);
 }
 
 }  // namespace gb::render

@@ -37,7 +37,7 @@ void DrawUpdate(render::Surface240& surface,
 
   widgets::DrawContentText(surface, 16, 42, "STATUS", theme.text_dim, 1);
   widgets::DrawContentText(surface, 16, 56, phase.empty() ? "READY" : phase,
-                    busy ? theme.accent : theme.text, 1);
+                    theme.text, 1);
 
   const int clamped = std::clamp(progress, 0, 100);
   widgets::DrawProgress(surface, theme, 78, clamped, !busy);
@@ -51,7 +51,7 @@ void DrawUpdate(render::Surface240& surface,
   widgets::DrawContentText(surface, 16, 136,
                     std::string("GAMEBIRD: ") +
                         (shell_update ? "UPDATE READY" : "CURRENT"),
-                    shell_update ? theme.accent : theme.text, 1);
+                    theme.text, 1);
   const auto [message_line1, message_line2] = WrapMessage(message);
   widgets::DrawContentText(surface, 16, 158, message_line1, theme.text_dim, 1);
   if (!message_line2.empty()) {

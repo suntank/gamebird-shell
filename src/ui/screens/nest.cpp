@@ -80,8 +80,7 @@ void NestMark(render::Surface240& surface, const render::Theme& theme,
   static render::ImageCache images(1);
   std::string error;
   if (const auto* bird = images.LoadPng(render::BundledSystemArt("apps-icon.png").string(), error)) {
-    const auto background = surface.Pixels()[y * surface.Width() + x];
-    render::BlitImageFit(surface, *bird, {x, y, 22 * scale, 18 * scale}, background, true);
+    render::BlitImageFit(surface, *bird, {x, y, 22 * scale, 18 * scale}, std::nullopt, true);
     return;
   }
   // A small bird sitting in its nest, drawn with the shell's pixel palette.
@@ -725,7 +724,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
   if (s.view == View::Home) {
     NestMark(surface, theme, 22, 38, 1);
     DrawContentText(surface, 52, 39, "A home for indie games", theme.text);
-    DrawContentText(surface, 52, 51, s.parental_locked ? "FAMILY FILTER ON" : "DISCOVER SOMETHING NEW", s.parental_locked ? theme.success : theme.text_dim);
+    DrawContentText(surface, 52, 51, s.parental_locked ? "FAMILY FILTER ON" : "DISCOVER SOMETHING NEW", theme.text);
     const std::vector<std::string> rows = {"Browse catalog", "Installed games", "Check for game updates", "Parental controls", "Developer code", "Back to Game Bird"};
     widgets::DrawList(surface, 16, 70, 208, 132, 22, rows, s.home_selected, theme);
     DrawMenuFooter(surface, theme, "A:OPEN  B:GAME BIRD"); return;
@@ -741,16 +740,16 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     }
     const auto& game = s.catalog.entries[s.catalog_selected];
     const int count = static_cast<int>(s.query.tags.size()) + (s.query.min_rating ? 1 : 0);
-    DrawContentText(surface, 16, 35, s.catalog.offline ? "OFFLINE / SAVED CATALOG" : "DISCOVER INDIE GAMES", s.catalog.offline ? theme.accent : theme.text_dim);
+    DrawContentText(surface, 16, 35, s.catalog.offline ? "OFFLINE / SAVED CATALOG" : "DISCOVER INDIE GAMES", theme.text);
     DrawContentText(surface, 16, 47, "PAGE " + std::to_string(s.query.page) + "/" + std::to_string(s.catalog.total_pages) + (count ? "  FILTERS " + std::to_string(count) : ""), theme.text_dim);
     s.DrawArt(surface, theme, {16, 61, 208, 90});
     if (game.rating) {
       surface.FillRect(163, 65, 57, 13, theme.panel);
-      DrawText(surface, 167, 68, Rating(game.rating), theme.accent);
+      DrawText(surface, 167, 68, Rating(game.rating), theme.text);
     }
     if (game.mature_content) {
       surface.FillRect(20, 133, 80, 13, theme.panel);
-      DrawText(surface, 24, 136, "MATURE 18+", theme.accent);
+      DrawText(surface, 24, 136, "MATURE 18+", theme.text);
     }
     if (!game.screenshot_urls.empty()) {
       const auto text = s.screenshot == 0 ? "ART  < >" : "SHOT " + std::to_string(s.screenshot) + " < >";
@@ -762,7 +761,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
       const int i = first + row, y = 155 + row * 17;
       const bool active = i == s.catalog_selected;
       surface.FillRect(16, y, 208, 15, active ? theme.accent : theme.bg);
-      DrawText(surface, 22, y + 4, FitLabel(s.catalog.entries[i].title, 194), active ? theme.bg : theme.text_dim);
+      DrawText(surface, 22, y + 4, FitLabel(s.catalog.entries[i].title, 194), theme.text_dim);
     }
     DrawMenuFooter(surface, theme, "A:DETAILS START:FILTER L/R:PAGE B:BACK"); return;
   }
@@ -773,12 +772,12 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     s.DrawArt(surface, theme, {16, 52, 86, 70});
     DrawText(surface, 112, 56, FitLabel("v" + game.version, 110), theme.text_dim);
     Stars(surface, theme, 111, 73, game.rating ? static_cast<int>(std::round(*game.rating)) : 0);
-    DrawText(surface, 112, 91, Rating(game.rating), theme.accent);
-    DrawText(surface, 112, 106, local ? (s.HasUpdate() ? "UPDATE READY" : "INSTALLED") : Size(game.download.size_bytes), local ? theme.success : theme.text_dim);
+    DrawText(surface, 112, 91, Rating(game.rating), theme.text);
+    DrawText(surface, 112, 106, local ? (s.HasUpdate() ? "UPDATE READY" : "INSTALLED") : Size(game.download.size_bytes), theme.text);
     const auto lines = s.DetailLines();
     for (int row = 0; row < 5 && s.scroll + row < static_cast<int>(lines.size()); ++row)
-      DrawText(surface, 16, 130 + row * 12, lines[s.scroll + row], row == 0 ? theme.text_dim : theme.text);
-    if (!s.message.empty()) DrawContentText(surface, 16, 195, s.message, theme.success);
+      DrawText(surface, 16, 130 + row * 12, lines[s.scroll + row], theme.text);
+    if (!s.message.empty()) DrawContentText(surface, 16, 195, s.message, theme.text);
     else if (lines.size() > 5) DrawContentText(surface, 16, 195, "UP/DOWN:READ MORE  <>:ART", theme.text_dim);
     else if (!game.screenshot_urls.empty()) DrawContentText(surface, 16, 195, "LEFT/RIGHT:VIEW SCREENSHOTS", theme.text_dim);
     DrawMenuFooter(surface, theme, !local ? "A:INSTALL  B:BACK" : s.HasUpdate() ? "A:UPDATE X:REMOVE Y:RATE B:BACK" : "A:PLAY X:REMOVE Y:RATE B:BACK"); return;
@@ -796,13 +795,13 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
       const bool active = i == selected;
       surface.FillRect(16, y, 208, 25, active ? theme.accent : theme.bg);
       const auto& game = games[i];
-      DrawText(surface, 22, y + 4, FitLabel(game.title, 194), active ? theme.bg : theme.text);
+      DrawText(surface, 22, y + 4, FitLabel(game.title, 194), theme.text);
       std::string sub = "v" + game.installed_version;
       const auto rating = s.ratings.find(game.id);
       if (rating != s.ratings.end()) sub += "    YOUR RATING " + std::to_string(rating->second) + "/5";
-      DrawText(surface, 22, y + 15, FitLabel(sub, 194), active ? theme.bg : theme.text_dim);
+      DrawText(surface, 22, y + 15, FitLabel(sub, 194), theme.text_dim);
     }
-    if (!s.message.empty()) DrawContentText(surface, 16, 199, s.message, theme.success);
+    if (!s.message.empty()) DrawContentText(surface, 16, 199, s.message, theme.text);
     DrawMenuFooter(surface, theme, "A:DETAILS X:PLAY Y:RATE B:BACK"); return;
   }
   if (s.view == View::Updates) {
@@ -813,7 +812,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     widgets::DrawList(surface, 16, 60, 208, 120, 24, rows, s.update_selected, theme);
     if (!s.updates.empty()) {
       const auto& item = s.updates[std::clamp(s.update_selected, 0, static_cast<int>(s.updates.size()) - 1)];
-      DrawContentText(surface, 16, 192, "v" + item.installed_version + " > v" + item.latest_version, theme.success);
+      DrawContentText(surface, 16, 192, "v" + item.installed_version + " > v" + item.latest_version, theme.text);
     }
     DrawMenuFooter(surface, theme, "A:VIEW UPDATE X:CHECK B:BACK"); return;
   }
@@ -831,7 +830,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     DrawMenuFooter(surface, theme, "A:TOGGLE START:APPLY X:CLEAR B:BACK"); return;
   }
   if (s.view == View::Parental) {
-    DrawContentText(surface, 16, 42, s.parental_enabled ? (s.parental_locked ? "FAMILY FILTER ON" : "UNLOCKED THIS SESSION") : "PARENTAL PIN NOT SET", s.parental_locked ? theme.success : theme.text_dim);
+    DrawContentText(surface, 16, 42, s.parental_enabled ? (s.parental_locked ? "FAMILY FILTER ON" : "UNLOCKED THIS SESSION") : "PARENTAL PIN NOT SET", theme.text);
     const auto explanation = Wrap(s.parental_enabled ? "Mature games stay hidden in Nest until the PIN is entered. Leaving Nest locks it again." : "Set a four digit PIN to hide mature games inside Nest.");
     for (int i = 0; i < static_cast<int>(explanation.size()); ++i) DrawText(surface, 16, 62 + 12 * i, explanation[i], theme.text_dim);
     std::vector<std::string> rows;
@@ -839,7 +838,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     else if (s.parental_locked) rows = {"Unlock with PIN", "Back"};
     else rows = {"Lock now", "Remove PIN", "Back"};
     widgets::DrawList(surface, 16, 110, 208, 66, 22, rows, s.parental_selected, theme);
-    DrawContentText(surface, 16, 188, s.error.empty() ? s.message : s.error, s.error.empty() ? theme.success : theme.accent);
+    DrawContentText(surface, 16, 188, s.error.empty() ? s.message : s.error, theme.text);
     DrawMenuFooter(surface, theme, "A:SELECT  B:BACK");
     return;
   }
@@ -850,18 +849,18 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
       const int x = 39 + i * 42;
       surface.FillRect(x, 87, 34, 42, i == s.pin_cursor ? theme.accent : theme.bg);
       surface.StrokeRect(x, 87, 34, 42, i == s.pin_cursor ? theme.text : theme.panel_border);
-      DrawText(surface, x + 11, 102, std::to_string(digits[i]), i == s.pin_cursor ? theme.bg : theme.text, 2);
+      DrawText(surface, x + 11, 102, std::to_string(digits[i]), theme.text, 2);
     }
     Center(surface, 148, "UP/DOWN:CHANGE DIGIT", theme.text_dim);
     Center(surface, 164, "LEFT/RIGHT:MOVE", theme.text_dim);
-    if (!s.error.empty()) Center(surface, 188, s.error, theme.accent);
+    if (!s.error.empty()) Center(surface, 188, s.error, theme.text);
     DrawMenuFooter(surface, theme, "A:CONFIRM  B:CANCEL"); return;
   }
   if (s.view == View::Developer) {
     Center(surface, 53, "LINK YOUR DEVELOPER ACCOUNT", theme.text);
     surface.FillRect(28, 82, 184, 48, theme.bg);
     surface.StrokeRect(28, 82, 184, 48, theme.panel_border);
-    Center(surface, 99, s.code.empty() ? "NO CODE RECEIVED" : s.code, theme.accent, 2);
+    Center(surface, 99, s.code.empty() ? "NO CODE RECEIVED" : s.code, theme.text, 2);
     Center(surface, 151, "Enter this code on the", theme.text_dim);
     Center(surface, 166, "Game Bird website to link", theme.text_dim);
     Center(surface, 181, "this device to your account.", theme.text_dim);
@@ -871,7 +870,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     Center(surface, 50, s.manifest ? s.manifest->title : "GAME BIRD NEST", theme.text);
     NestMark(surface, theme, 98, 71, 2);
     widgets::DrawProgress(surface, theme, 123, s.progress_percent, s.transfer_success);
-    Center(surface, 146, s.Active() ? s.progress_stage : s.error.empty() ? "COMPLETE" : "COULD NOT FINISH", s.transfer_success ? theme.success : theme.text);
+    Center(surface, 146, s.Active() ? s.progress_stage : s.error.empty() ? "COMPLETE" : "COULD NOT FINISH", theme.text);
     const auto lines = Wrap(s.error.empty() ? s.message : s.error);
     for (int i = 0; i < std::min(3, static_cast<int>(lines.size())); ++i) Center(surface, 164 + i * 12, lines[i], theme.text_dim);
     DrawMenuFooter(surface, theme, s.Active() ? "B:CANCEL" : "A:CONTINUE  B:BACK"); return;
@@ -885,7 +884,7 @@ void NestController::Draw(render::Surface240& surface, const render::Theme& them
     Center(surface, 54, s.rating_title, theme.text);
     Center(surface, 79, "HOW WAS YOUR GAME?", theme.text_dim);
     Stars(surface, theme, 42, 111, s.pending_rating, 2);
-    Center(surface, 149, std::to_string(s.pending_rating) + " / 5", theme.accent);
+    Center(surface, 149, std::to_string(s.pending_rating) + " / 5", theme.text);
     Center(surface, 178, "LEFT/RIGHT:CHOOSE RATING", theme.text_dim);
     DrawMenuFooter(surface, theme, "A:SAVE RATING  B:CANCEL"); return;
   }

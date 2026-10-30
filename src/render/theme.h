@@ -4,6 +4,8 @@
 
 namespace gb::render {
 
+class Surface240;
+
 struct Theme {
   std::uint16_t bg;
   std::uint16_t panel;
@@ -15,5 +17,6 @@ struct Theme {
 };
 
 Theme DefaultTheme();
+void DrawThemeBackground(Surface240& surface, const Theme& theme);
 
 }  // namespace gb::render

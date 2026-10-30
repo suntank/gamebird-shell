@@ -19,7 +19,7 @@ void DrawHome(render::Surface240& surface,
   widgets::DrawMenuFrame(surface, theme, "GAMEBIRD");
   widgets::DrawContentText(surface, 16, 40,
       state.continue_available ? state.continue_title : "Your next game starts here",
-      state.continue_available ? theme.accent : theme.text_dim);
+      theme.text);
   widgets::DrawList(surface, 16, 58, 208, 140, 20, items, state.home_selected, theme);
   widgets::DrawMenuFooter(surface, theme, "A:OPEN  B:BACK  START:BACK");
 }

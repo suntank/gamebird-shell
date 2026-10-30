@@ -4433,7 +4433,7 @@ void DrawTvModeOverlay(gb::render::Surface240& surface,
   surface.FillRect(20, 84, 200, lib.tv_external_controller ? 46 : 68, theme.bg);
   surface.StrokeRect(20, 84, 200, lib.tv_external_controller ? 46 : 68,
                      theme.accent);
-  gb::ui::widgets::DrawText(surface, 56, 96, "TV MODE ENABLED", theme.accent, 1);
+  gb::ui::widgets::DrawText(surface, 56, 96, "TV MODE ENABLED", theme.text, 1);
   if (!lib.tv_external_controller) {
     gb::ui::widgets::DrawText(surface, 31, 112, "PLEASE PLUG IN AN EXTERNAL", theme.text, 1);
     gb::ui::widgets::DrawText(surface, 56, 126, "USB CONTROLLER", theme.text, 1);
@@ -4451,7 +4451,7 @@ void DrawUpdateNotice(gb::render::Surface240& surface,
   }
   surface.FillRect(18, 154, 204, 58, theme.bg);
   surface.StrokeRect(18, 154, 204, 58, theme.accent);
-  gb::ui::widgets::DrawText(surface, 50, 166, "UPDATE AVAILABLE", theme.accent, 1);
+  gb::ui::widgets::DrawText(surface, 50, 166, "UPDATE AVAILABLE", theme.text, 1);
   gb::ui::widgets::DrawText(surface, 34, 184, "GO TO TOOLS > SYSTEM UPDATE",
                             theme.text, 1);
 }
@@ -4471,7 +4471,7 @@ void DrawScreen(gb::render::Surface240& surface,
       break;
     case gb::ui::Screen::GameMenu: {
       gb::ui::widgets::DrawMenuFrame(surface, theme, "GAME MENU");
-      gb::ui::widgets::DrawContentText(surface, 16, 38, lib.menu_game.title, theme.accent);
+      gb::ui::widgets::DrawContentText(surface, 16, 38, lib.menu_game.title, theme.text);
       gb::ui::widgets::DrawContentText(surface, 16, 51, lib.menu_game.system_name, theme.text_dim);
       std::vector<std::string> rows;
       for (const auto& action : GameActions(lib)) rows.push_back(action.second);
@@ -4483,7 +4483,7 @@ void DrawScreen(gb::render::Surface240& surface,
     case gb::ui::Screen::SystemMenu: {
       gb::ui::widgets::DrawMenuFrame(surface, theme, "SYSTEM MENU");
       const std::string title = lib.systems.empty() ? "No systems" : lib.systems[lib.system_selected].name;
-      gb::ui::widgets::DrawContentText(surface, 16, 40, title, theme.accent);
+      gb::ui::widgets::DrawContentText(surface, 16, 40, title, theme.text);
       gb::ui::widgets::DrawList(surface, 16, 68, 208, 90, 30,
           {"Browse games", "Launch options", "Main menu"}, lib.context_selected, theme);
       gb::ui::widgets::DrawMenuFooter(surface, theme, "A:SELECT  B:BACK  START:BACK");
@@ -4567,8 +4567,7 @@ void DrawScreen(gb::render::Surface240& surface,
           surface, 16, 176,
           "Effective: " + Ellipsize(lib.launch_options_effective_core, 18) +
               " [" + Ellipsize(lib.launch_options_effective_source, 8) + "]",
-          lib.launch_options_effective_warning.empty() ? theme.text_dim
-                                                       : theme.accent,
+          theme.text,
           1);
       gb::ui::widgets::DrawText(
           surface, 16, 188,
@@ -4699,7 +4698,7 @@ void DrawScreen(gb::render::Surface240& surface,
         gb::ui::widgets::DrawText(
             surface, 16, 120,
             std::string("Press: ") + ButtonName(kRemapCaptureOrder[step]),
-            theme.accent, 1);
+            theme.text, 1);
         gb::ui::widgets::DrawText(surface, 16, 134,
                                   "Hold 1s to skip opt", theme.text_dim, 1);
         gb::ui::widgets::DrawText(surface, 16, 146,
@@ -4748,7 +4747,7 @@ void DrawScreen(gb::render::Surface240& surface,
             std::string(lib.input_test_seen[i] ? "[X] " : "[ ] ") +
             ButtonName(kButtonOrder[i]);
         gb::ui::widgets::DrawText(surface, x, y, label,
-                                  lib.input_test_seen[i] ? theme.success : theme.text_dim,
+                                  theme.text,
                                   1);
       }
       gb::ui::widgets::DrawText(surface, 16, 190,

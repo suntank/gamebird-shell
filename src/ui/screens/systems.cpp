@@ -62,15 +62,14 @@ void DrawSystems(render::Surface240& surface,
     std::string image_error;
     const auto* icon = image_cache.LoadPng(item.icon_path, image_error);
     if (icon != nullptr) {
-      // The supplied controller silhouettes are black; a light tile keeps them legible.
-      render::BlitImageFit(surface, *icon, render::Rect{68, 36, 104, 96}, theme.text, true);
+      render::BlitImageFit(surface, *icon, render::Rect{68, 36, 104, 96}, std::nullopt, true);
     } else {
       DrawFallbackConsole(surface, theme);
     }
 
     const auto* logo = image_cache.LoadPng(item.logo_path, image_error);
     if (logo != nullptr) {
-      render::BlitImageFit(surface, *logo, render::Rect{28, 140, 184, 28}, theme.panel, true);
+      render::BlitImageFit(surface, *logo, render::Rect{28, 140, 184, 28}, std::nullopt, true);
     } else {
       DrawCenteredText(surface, 140, FitText(item.name, 18), theme.text, 2);
     }

@@ -24,9 +24,7 @@ inline void DrawContentText(render::Surface240& surface, int x, int y,
 
 inline void DrawMenuFrame(render::Surface240& surface, const render::Theme& theme,
                           std::string_view title) {
-  surface.Clear(theme.bg);
-  surface.FillRect(8, 8, 224, 224, theme.panel);
-  surface.FillRect(8, 8, 224, 20, theme.bg);
+  render::DrawThemeBackground(surface, theme);
   surface.FillRect(16, 16, 3, 8, theme.accent);
   DrawText(surface, 25, 17, FitLabel(title, 198), theme.text);
   surface.FillRect(16, 28, 208, 1, theme.panel_border);

@@ -54,7 +54,7 @@ void DrawKeyboard(render::Surface240& surface, const render::Theme& theme,
     std::string glyph(1, chars[static_cast<std::size_t>(i)]);
     if (glyph == " ") glyph = "_";
     widgets::DrawContentText(surface, x + 11, y + 4, glyph,
-                      active ? theme.bg : theme.text, 1);
+                      theme.text, 1);
   }
 }
 
@@ -73,7 +73,7 @@ void DrawCountryKeyboard(render::Surface240& surface, const render::Theme& theme
     surface.FillRect(x, y, 22, 16, active ? theme.accent : theme.bg);
     surface.StrokeRect(x, y, 22, 16, active ? theme.text : theme.panel_border);
     widgets::DrawContentText(surface, x + 8, y + 4, std::string(1, kChars[i]),
-                      active ? theme.bg : theme.text, 1);
+                      theme.text, 1);
   }
 }
 
@@ -99,7 +99,7 @@ void DrawWifi(render::Surface240& surface,
     surface.FillRect(25, 56, 8, 8, connected ? theme.success : theme.accent);
     widgets::DrawContentText(surface, 42, 50, connected ? "CONNECTED" :
                       (wifi_enabled ? "NOT CONNECTED" : "WI-FI OFF"),
-                      connected ? theme.success : theme.text_dim, 1);
+                      theme.text, 1);
     widgets::DrawContentText(surface, 42, 66,
                       connected ? Fit(connected_ssid, 21) : "Choose a network",
                       theme.text, 1);
@@ -131,10 +131,10 @@ void DrawWifi(render::Surface240& surface,
       surface.FillRect(16, y, 208, 19, active ? theme.accent : theme.bg);
       if (active) surface.FillRect(16, y, 3, 19, theme.accent);
       widgets::DrawContentText(surface, 22, y + 5, network.active ? "*" : " ",
-                        active ? theme.bg : theme.success, 1);
+                        theme.text, 1);
       widgets::DrawContentText(surface, 32, y + 5, Fit(network.ssid, 22),
-                        active ? theme.bg : theme.text, 1);
-      if (network.secured) widgets::DrawContentText(surface, 172, y + 5, "LOCK", active ? theme.bg : theme.text_dim, 1);
+                        theme.text, 1);
+      if (network.secured) widgets::DrawContentText(surface, 172, y + 5, "LOCK", theme.text_dim, 1);
       Signal(surface, 199, y + 2, network.signal, theme);
     }
     if (!status.empty()) widgets::DrawContentText(surface, 16, 198, Fit(status, 34), theme.text_dim, 1);

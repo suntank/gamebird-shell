@@ -91,7 +91,7 @@ void DrawGameBrowser(render::Surface240& surface,
 
   if (!status.empty()) {
     surface.FillRect(16, 198, 208, 9, theme.panel);
-    DrawCenteredText(surface, 200, FitText(status, 34), theme.accent);
+    DrawCenteredText(surface, 200, FitText(status, 34), theme.text);
   }
 }
 
