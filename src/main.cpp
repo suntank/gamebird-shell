@@ -1345,6 +1345,12 @@ bool UpdateIsBusy(const UpdateStatus& update) {
          phase == "rebooting";
 }
 
+bool UpdateNeedsRestart(const UpdateStatus& update) {
+  // Older status records also set reboot_required for an update offer. Only
+  // an already installed payload awaiting reboot is a restart action.
+  return update.reboot_required && ToLower(update.phase) == "restart required";
+}
+
 UpdateStatus ParseUpdateStatus(std::istream& input,
                               const std::string& current_boot_id,
                               const std::uint64_t boot_time) {
@@ -3266,7 +3272,7 @@ void RunToolAction(const Args& args,
       ui.screen = gb::ui::Screen::Update;
       if (!UpdateIsBusy(lib.update_status) &&
           lib.update_status.os_updates == 0 &&
-          !lib.update_status.shell_update && !lib.update_status.reboot_required) {
+          !lib.update_status.shell_update && !UpdateNeedsRestart(lib.update_status)) {
         StartUpdateAction(lib, false);
       }
       break;
@@ -3864,7 +3870,7 @@ void HandleButton(gb::platform::Button button,
       const bool busy = UpdateIsBusy(lib.update_status);
       if (button == gb::platform::Button::A && !busy) {
         const bool available = lib.update_status.os_updates > 0 ||
-                               lib.update_status.shell_update || lib.update_status.reboot_required;
+                               lib.update_status.shell_update || UpdateNeedsRestart(lib.update_status);
         StartUpdateAction(lib, available);
         ui.needs_redraw = true;
         return;
@@ -4666,7 +4672,7 @@ void DrawScreen(gb::render::Surface240& surface,
           lib.update_status.shell_update, UpdateIsBusy(lib.update_status),
           lib.update_status.message, GBSHELL_BUILD_COMMIT,
           lib.update_status.installed_commit, lib.update_status.remote_commit,
-          frame_start_ms, lib.update_status.reboot_required);
+          frame_start_ms, UpdateNeedsRestart(lib.update_status));
       break;
     }
     case gb::ui::Screen::LaunchOptions: {

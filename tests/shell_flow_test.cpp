@@ -81,6 +81,11 @@ int main(int argc, char** argv) {
       "phase=UPDATE AVAILABLE\nshell_update=1\nboot_id=previous-boot\n");
   Expect(available_update.shell_update && !UpdateIsBusy(available_update),
       "completed availability check remains usable across boots");
+  const auto os_offer = update_status(
+      "phase=UPDATE AVAILABLE\nos_updates=260\nshell_update=0\nreboot_required=1\n");
+  Expect(!UpdateNeedsRestart(os_offer), "pending OS updates offer Install, even when they will require a reboot");
+  Expect(UpdateNeedsRestart(update_status("phase=RESTART REQUIRED\nreboot_required=1\n")),
+      "only a completed installation awaiting reboot offers Restart");
   const auto versioned_update = update_status(
       "phase=VERIFYING GAMEBIRD\ninstalled_commit=abc123\nremote_commit=def456\noperation_id=new-run\n");
   Expect(UpdateIsBusy(versioned_update) && versioned_update.installed_commit == "abc123" &&
