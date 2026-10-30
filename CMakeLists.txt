@@ -54,6 +54,15 @@ if(NOT SQLITE3_LIBRARY)
 endif()
 
 if(BUILD_TESTING)
+  add_executable(readable_text_test
+    tests/readable_text_test.cpp
+    src/ui/widgets/text.cpp
+    src/render/surface_240.cpp
+  )
+  target_include_directories(readable_text_test PRIVATE src)
+  target_compile_options(readable_text_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME readable_text_test COMMAND readable_text_test)
+
   add_executable(launch_config_test
     tests/launch_config_test.cpp
     src/core/launch_config.cpp

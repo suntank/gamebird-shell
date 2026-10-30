@@ -80,6 +80,14 @@ developer linking code. B returns through Nest's screens and from its home
 returns to the shell. Opening and closing Nest does not restart the display or
 reboot the device. Network and package operations run on a background worker.
 
+Nest is laid out for the 240×240 handheld screen. Browse and Installed show one
+game at a time with large cover art; Up/Down moves between games. X opens the
+full-art viewer from Browse, and Select opens it from a game's details.
+Left/Right cycles the cover and screenshots; B returns to the same game.
+Details starts with artwork, then Down opens larger, scrolling description and
+release notes (Up returns to the cover). Home and filter menus use large scrolling
+rows, and progress, errors, PIN entry and ratings use the same readable text.
+
 Nest uses the existing Worker API and CDN. It caches catalog data for offline
 browsing and checks package size and SHA-256 before installing. Updates stage
 and verify their contents before replacing an installed game. Game payloads

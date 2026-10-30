@@ -301,6 +301,10 @@ int MeasureTextWidth(const std::string_view text, const int scale) {
   return static_cast<int>(text.size()) * 6 * scale;
 }
 
+int MeasureReadableTextWidth(const std::string_view text) {
+  return static_cast<int>(text.size()) * 9;
+}
+
 void DrawText(render::Surface240& surface,
               int x,
               const int y,
@@ -324,6 +328,37 @@ void DrawText(render::Surface240& surface,
       }
     }
     x += 6 * scale;
+  }
+}
+
+void DrawReadableText(render::Surface240& surface,
+                      int x,
+                      const int y,
+                      const std::string_view text,
+                      const std::uint16_t color) {
+  constexpr int advance = 9;
+  constexpr int glyph_width = 8;
+  constexpr int glyph_height = 11;
+  const int available = std::max(0, (surface.Width() - x) / advance);
+  const bool truncated = static_cast<int>(text.size()) > available;
+  int index = 0;
+  for (const char original : text) {
+    if (index >= available) break;
+    const char c = truncated && available >= 3 && index >= available - 3 ? '.' : original;
+    ++index;
+    const Glyph& glyph = LookupGlyph(c);
+    for (int row = 0; row < 7; ++row) {
+      const int top = row * glyph_height / 7;
+      const int bottom = (row + 1) * glyph_height / 7;
+      for (int col = 0; col < 5; ++col) {
+        if ((glyph[row] >> (4 - col)) & 1) {
+          const int left = col * glyph_width / 5;
+          const int right = (col + 1) * glyph_width / 5;
+          surface.FillRect(x + left, y + top, right - left, bottom - top, color);
+        }
+      }
+    }
+    x += advance;
   }
 }
 

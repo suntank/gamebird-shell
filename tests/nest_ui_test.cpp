@@ -40,6 +40,16 @@ void Wait(gb::ui::screens::NestController& controller) {
   }
   Expect(!controller.Busy(), "local background task completes");
 }
+bool ReadableLineMatches(const gb::render::Surface240& surface, const int y,
+                         const std::string& text, const std::uint16_t color) {
+  gb::render::Surface240 expected;
+  gb::ui::widgets::DrawReadableText(expected, 8, y, text, color);
+  for (int row = y; row < y + 11; ++row)
+    for (int x = 8; x < 224; ++x)
+      if ((surface.Pixels()[row * 240 + x] == color) !=
+          (expected.Pixels()[row * 240 + x] == color)) return false;
+  return true;
+}
 }
 
 int main(int argc, char** argv) {
@@ -67,20 +77,25 @@ int main(int argc, char** argv) {
   const auto theme = gb::render::DefaultTheme();
   gb::render::Surface240 surface;
   gb::render::Surface240 backdrop;
-  gb::render::DrawThemeBackground(backdrop, theme);
+  backdrop.Clear(gb::ui::screens::kNestBackground);
   auto draw = [&](const std::string& name) {
     controller.Draw(surface, theme);
     bool margins = true;
     for (int y = 0; y < 240; ++y)
       for (const int x : {0, 1, 238, 239})
         margins &= surface.Pixels()[y * 240 + x] == backdrop.Pixels()[y * 240 + x];
-    Expect(margins, "screen rendering stays inside shell margins");
+    Expect(margins, "Nest keeps a plain background and clear outside margins");
     Save(previews, name, surface);
   };
   draw("01-nest-home");
-  Expect(surface.Pixels()[70 * 240 + 16] == theme.accent, "catalog is the first highlighted Nest action");
+  Expect(gb::ui::screens::PlainText("Hatchling\xe2\x80\x99s nest") == "Hatchling's nest",
+         "store typographic apostrophes use the font's readable ASCII equivalent");
+  Expect(surface.Pixels()[48 * 240 + 8] == theme.accent, "catalog is the first highlighted Nest action");
   controller.HandleButton(Button::Up);
   Expect(s.home_selected == 5, "home navigation wraps");
+  draw("01b-nest-home-scrolled");
+  Expect(surface.Pixels()[148 * 240 + 8] == theme.accent,
+         "scrolling home keeps the last action visibly selected");
   controller.HandleButton(Button::Down);
   Expect(s.home_selected == 0, "home returns to browse action");
 
@@ -110,17 +125,53 @@ int main(int argc, char** argv) {
   s.catalog.total = 45; s.catalog.total_pages = 2;
   s.cached = s.catalog.entries;
   s.view = View::Catalog;
+  const auto artwork_bounds_match = [&](const int left, const int top, const int size) {
+    // The fixture uses a color range distinct from Nest's background, text and panels.
+    int min_x = 240, min_y = 240, max_x = -1, max_y = -1;
+    for (int y = 0; y < 240; ++y) for (int x = 0; x < 240; ++x) {
+      const auto pixel = surface.Pixels()[y * 240 + x];
+      const int red = (pixel >> 11) & 31, blue = pixel & 31;
+      if (red < 5 || red > 13 || blue < 16 || blue > 24) continue;
+      min_x = std::min(min_x, x); min_y = std::min(min_y, y);
+      max_x = std::max(max_x, x); max_y = std::max(max_y, y);
+    }
+    return min_x == left && min_y == top && max_x == left + size - 1 && max_y == top + size - 1;
+  };
   draw("02-nest-catalog");
-  Expect(surface.Pixels()[155 * 240 + 16] == theme.accent, "catalog highlights selected game");
+  Expect(artwork_bounds_match(44, 28, 152), "catalog shows square cover art at 152 pixels high");
   bool footer_gap_clear = true;
-  for (int x = 16; x < 224; ++x)
-    footer_gap_clear &= surface.Pixels()[220 * 240 + x] == backdrop.Pixels()[220 * 240 + x];
-  Expect(footer_gap_clear, "two-line controls do not overlap a previously drawn footer");
+  for (int x = 8; x < 232; ++x)
+    footer_gap_clear &= surface.Pixels()[224 * 240 + x] == backdrop.Pixels()[224 * 240 + x];
+  Expect(footer_gap_clear, "readable footer lines retain a clear gap");
+  s.catalog.entries[0].title = "Hungry Hatchling Deluxe";
+  draw("02b-nest-long-title");
+  Expect(artwork_bounds_match(52, 28, 136), "two-line titles retain large separate artwork");
+  bool title_footer_gap_clear = true;
+  for (int x = 8; x < 232; ++x)
+    title_footer_gap_clear &= surface.Pixels()[204 * 240 + x] == backdrop.Pixels()[204 * 240 + x];
+  Expect(title_footer_gap_clear, "wrapped game titles stay above the footer");
+  s.catalog.entries[0].title = game.title;
+  controller.HandleButton(Button::Down);
+  Expect(s.catalog_selected == 1 && s.screenshot == 0, "down selects the next featured game");
   controller.HandleButton(Button::Right);
   Expect(s.screenshot == 1, "right opens a game screenshot");
+  controller.HandleButton(Button::X);
+  Expect(s.view == View::Artwork && s.art_return == View::Catalog,
+         "X opens the catalog artwork viewer");
+  draw("02c-nest-artwork");
+  Expect(artwork_bounds_match(14, 4, 212), "artwork viewer expands square images to 212 pixels high");
+  controller.HandleButton(Button::Left);
+  Expect(s.screenshot == 0 && s.CurrentImage() == game.icon_url, "artwork viewer returns to cover art");
+  controller.HandleButton(Button::Right);
+  controller.HandleButton(Button::A);
+  Expect(s.view == View::Artwork && !controller.Busy() && s.launch_path.empty(),
+         "artwork confirmation never starts an install or a game");
+  controller.HandleButton(Button::B);
+  Expect(s.view == View::Catalog && s.catalog_selected == 1 && s.screenshot == 1,
+         "leaving artwork restores the selected game and image");
   controller.HandleButton(Button::B);
   Expect(s.view == View::Home, "B returns catalog to Nest home");
-  s.view = View::Catalog; s.catalog.offline = true;
+  s.view = View::Catalog; s.catalog.offline = true; s.catalog_selected = 0;
   draw("03-nest-offline-catalog");
 
   gb::nest::Manifest manifest;
@@ -131,19 +182,60 @@ int main(int argc, char** argv) {
   manifest.changelog = {{"1.2.0", "2026-10-10", {"New sky islands", "Improved controls"}}};
   s.manifest = manifest; s.view = View::Detail; s.screenshot = 0;
   draw("04-nest-details");
+  Expect(artwork_bounds_match(44, 28, 152), "details initially give the cover the same large area");
+  controller.HandleButton(Button::Down);
+  Expect(s.scroll == 1, "down switches the cover to the readable information page");
+  draw("04b-nest-details-reader");
+  Expect(ReadableLineMatches(surface, 70, s.DetailLines().front(), theme.text),
+         "the information reader starts with the first complete line");
+  controller.HandleButton(Button::Select);
+  Expect(s.view == View::Artwork && s.art_return == View::Detail,
+         "Select opens artwork without using the installed-game remove action");
+  controller.HandleButton(Button::Right);
+  controller.HandleButton(Button::B);
+  Expect(s.view == View::Detail && s.scroll == 1 && s.screenshot == 1,
+         "leaving detail artwork preserves reader and screenshot positions");
   for (int i = 0; i < 50; ++i) controller.HandleButton(Button::Down);
-  Expect(s.scroll == static_cast<int>(s.DetailLines().size()) - 5, "detail scrolling includes full description and changelog");
+  const auto detail_lines = s.DetailLines();
+  Expect(s.scroll == static_cast<int>(detail_lines.size()) - gb::ui::screens::kDetailRows + 1,
+         "detail scrolling reaches the final description and changelog page");
   draw("05-nest-details-scrolled");
-  s.scroll = 0;
+  Expect(ReadableLineMatches(surface, 70 + (gb::ui::screens::kDetailRows - 1) * 16,
+                             detail_lines.back(), theme.text),
+         "the reader renders its final line above the controls");
+  for (int i = 0; i < 50; ++i) controller.HandleButton(Button::Up);
+  Expect(s.scroll == 0, "scrolling up returns from information to the large cover");
 
   gb::nest::InstalledGame installed;
   installed.id = game.slug; installed.title = game.title;
   installed.installed_version = game.version;
   installed.install_path = config.games_dir / game.slug; installed.launcher_path = config.launchers_dir / "nest-sky-garden.gbgame";
   installed.package_format_version = 1;
+  installed.icon_url = "installed-icon";
+  s.image_paths[installed.icon_url] = (dir / "art.png").string();
   s.installed = {{game.slug, installed}}; s.ratings = {{game.slug, 4}};
   s.view = View::Installed;
   draw("06-nest-installed");
+  Expect(s.CurrentImage() == installed.icon_url && artwork_bounds_match(44, 28, 152),
+         "installed games display their saved store artwork at featured size");
+  const std::vector<std::uint16_t> installed_content(surface.Pixels(), surface.Pixels() + 205 * 240);
+  s.message = "Rating saved. Thank you!";
+  draw("06b-nest-installed-notice");
+  Expect(std::equal(installed_content.begin(), installed_content.end(), surface.Pixels()),
+         "installed notices preserve the entire cover and large game title");
+  Expect(ReadableLineMatches(surface, 226, s.message, gb::ui::screens::kNestMuted),
+         "installed notices appear in the footer");
+  s.installed.at(game.slug).icon_url.clear();
+  Expect(s.CurrentImage() == game.icon_url, "legacy installed art falls back to cached catalog metadata");
+  auto second_installed = installed;
+  second_installed.id = "zen-puzzle"; second_installed.title = "Zen Puzzle";
+  s.installed[second_installed.id] = second_installed;
+  controller.HandleButton(Button::Down);
+  Expect(s.installed_selected == 1 && s.CurrentImage() == second_installed.icon_url,
+         "installed gallery navigation selects the next game's saved artwork");
+  Expect(s.message.empty(), "changing the installed game clears the previous notice");
+  controller.HandleButton(Button::Up);
+  s.installed.erase(second_installed.id);
   controller.HandleButton(Button::Y);
   Expect(s.view == View::Rating && s.pending_rating == 4, "installed games offer saved rating");
   controller.HandleButton(Button::Right);
@@ -164,6 +256,13 @@ int main(int argc, char** argv) {
   s.filter_selected = 5; controller.HandleButton(Button::A);
   Expect(s.draft_tags == std::vector<std::string>{"adventure"}, "tag filters toggle by ID");
   draw("09-nest-filters");
+  controller.HandleButton(Button::Down);
+  draw("09b-nest-filters-scrolled");
+  Expect(s.filter_selected == 6 && surface.Pixels()[148 * 240 + 8] == theme.accent,
+         "the last filter remains visible as the larger rows scroll");
+  controller.HandleButton(Button::A);
+  Expect(std::find(s.draft_tags.begin(), s.draft_tags.end(), "pixel") != s.draft_tags.end(),
+         "the last scrolled filter can still be toggled");
   controller.HandleButton(Button::X);
   Expect(!s.draft_rating && s.draft_tags.empty(), "X clears all filters");
 

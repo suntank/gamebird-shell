@@ -24,11 +24,59 @@
 namespace gb::ui::screens {
 namespace {
 using platform::Button;
-using widgets::DrawContentText;
-using widgets::DrawMenuFooter;
-using widgets::DrawMenuFrame;
 using widgets::DrawText;
 using widgets::FitLabel;
+
+constexpr auto kNestBackground = render::Rgb565(8, 17, 29);
+constexpr auto kNestPanel = render::Rgb565(17, 29, 43);
+constexpr auto kNestMuted = render::Rgb565(185, 204, 220);
+constexpr int kDetailRows = 8;
+
+std::string PlainText(std::string text) {
+  // Store descriptions commonly contain typographic quotes; the shell font
+  // has ASCII glyphs, so keep their readable equivalents rather than "???".
+  for (const auto& [from, to] : std::array<std::pair<std::string_view, std::string_view>, 8>{{
+           {"\xe2\x80\x98", "'"}, {"\xe2\x80\x99", "'"}, {"\xe2\x80\x9c", "\""},
+           {"\xe2\x80\x9d", "\""}, {"\xe2\x80\x93", "-"}, {"\xe2\x80\x94", "-"},
+           {"\xe2\x80\xa6", "..."}, {"\xc2\xa0", " "}}}) {
+    std::size_t at = 0;
+    while ((at = text.find(from, at)) != std::string::npos) {
+      text.replace(at, from.size(), to);
+      at += to.size();
+    }
+  }
+  return text;
+}
+
+std::string FitRead(const std::string& input, const int width = 224) {
+  const auto text = PlainText(input);
+  const int count = std::max(0, width / 9);
+  if (static_cast<int>(text.size()) <= count) return text;
+  return count <= 3 ? text.substr(0, count) : text.substr(0, count - 3) + "...";
+}
+void Read(render::Surface240& surface, const int x, const int y,
+          const std::string& text, const std::uint16_t color, const int width = 224) {
+  widgets::DrawReadableText(surface, x, y, FitRead(text, width), color);
+}
+void Large(render::Surface240& surface, const int x, const int y,
+           const std::string& text, const std::uint16_t color, const int width = 224) {
+  DrawText(surface, x, y, FitLabel(PlainText(text), width, 2), color, 2);
+}
+void Frame(render::Surface240& surface, const render::Theme& theme,
+           const std::string& title, const std::string& counter = {}) {
+  surface.Clear(kNestBackground);
+  const auto info = FitRead(counter, 144);
+  const int info_width = static_cast<int>(info.size()) * 9;
+  Large(surface, 8, 8, title, theme.text, info.empty() ? 224 : std::min(164, 216 - info_width));
+  if (!info.empty()) Read(surface, 232 - info_width, 10, info, kNestMuted);
+  surface.FillRect(8, 26, 224, 1, theme.panel_border);
+}
+void Footer(render::Surface240& surface, const render::Theme& theme,
+            const std::string& first, const std::string& second = {}) {
+  surface.FillRect(8, 205, 224, 1, theme.panel_border);
+  Read(surface, 8, 211, first, theme.text);
+  if (!second.empty()) Read(surface, 8, 226, second, kNestMuted);
+}
 
 std::string Rating(const std::optional<double>& rating) {
   if (!rating) return "NOT RATED";
@@ -43,9 +91,9 @@ std::string Size(const std::uint64_t size) {
        << static_cast<double>(size) / (1024 * 1024) << " MB";
   return text.str();
 }
-std::vector<std::string> Wrap(const std::string& text, const int columns = 34) {
+std::vector<std::string> Wrap(const std::string& text, const int columns = 24) {
   std::vector<std::string> lines;
-  std::istringstream words(text);
+  std::istringstream words(PlainText(text));
   std::string line, word;
   while (words >> word) {
     while (word.size() > static_cast<std::size_t>(columns)) {
@@ -53,7 +101,7 @@ std::vector<std::string> Wrap(const std::string& text, const int columns = 34) {
       lines.push_back(word.substr(0, columns));
       word.erase(0, columns);
     }
-    if (line.size() + word.size() + 1 > static_cast<std::size_t>(columns)) {
+    if (!line.empty() && line.size() + word.size() + 1 > static_cast<std::size_t>(columns)) {
       lines.push_back(line); line.clear();
     }
     if (!line.empty()) line += ' ';
@@ -64,16 +112,40 @@ std::vector<std::string> Wrap(const std::string& text, const int columns = 34) {
 }
 void Center(render::Surface240& surface, const int y, const std::string& text,
             const std::uint16_t color, const int scale = 1) {
-  const auto fitted = FitLabel(text, 208, scale);
-  DrawText(surface, std::max(16, (240 - widgets::MeasureTextWidth(fitted, scale)) / 2),
-           y, fitted, color, scale);
+  const auto fitted = scale == 2 ? FitLabel(text, 224, 2) : FitRead(text);
+  const int width = scale == 2 ? widgets::MeasureTextWidth(fitted, 2) : widgets::MeasureReadableTextWidth(fitted);
+  if (scale == 2) Large(surface, (240 - width) / 2, y, fitted, color);
+  else Read(surface, (240 - width) / 2, y, fitted, color);
 }
 void Message(render::Surface240& surface, const render::Theme& theme,
              const std::string& title, const std::string& detail = {}) {
-  Center(surface, 94, title, theme.text);
+  const auto titles = Wrap(title, 18);
+  for (int i = 0; i < std::min(2, static_cast<int>(titles.size())); ++i)
+    Center(surface, 54 + i * 20, titles[i], theme.text, 2);
   const auto lines = Wrap(detail);
-  for (int i = 0; i < std::min(4, static_cast<int>(lines.size())); ++i)
-    Center(surface, 118 + i * 13, lines[i], theme.text_dim);
+  for (int i = 0; i < std::min(6, static_cast<int>(lines.size())); ++i)
+    Read(surface, 8, 104 + i * 16, lines[i], kNestMuted);
+}
+void ReadList(render::Surface240& surface, const render::Theme& theme,
+              const std::vector<std::string>& rows, const int selected,
+              const int y = 48, const int height = 50, const int visible = 3) {
+  const int count = static_cast<int>(rows.size());
+  if (!count) return;
+  const int current = std::clamp(selected, 0, count - 1);
+  const int first = std::clamp(current - 1, 0, std::max(0, count - visible));
+  for (int row = 0; row < visible && first + row < count; ++row) {
+    const int index = first + row, top = y + row * height;
+    surface.FillRect(8, top, 220, height - 4, index == current ? theme.accent : kNestPanel);
+    if (index == current) surface.FillRect(8, top + 4, 3, height - 12, theme.text);
+    const auto lines = Wrap(rows[index], 17);
+    for (int line = 0; line < std::min(height >= 44 ? 2 : 1, static_cast<int>(lines.size())); ++line)
+      Large(surface, 16, top + 7 + line * 17, lines[line], theme.text, 204);
+  }
+  if (count > visible) {
+    const int track = visible * height - 4, thumb = std::max(12, track * visible / count);
+    surface.FillRect(232, y, 2, track, theme.panel_border);
+    surface.FillRect(232, y + (track - thumb) * first / (count - visible), 2, thumb, theme.text);
+  }
 }
 void NestMark(render::Surface240& surface, const render::Theme& theme,
               const int x, const int y, const int scale = 1) {
@@ -114,7 +186,7 @@ int Move(const int selected, const int delta, const int count) {
 
 struct NestController::Impl {
   enum class View { Home, Catalog, Detail, Installed, Updates, Filters, Parental,
-                    Pin, Developer, Transfer, Remove, Rating };
+                    Pin, Developer, Transfer, Remove, Rating, Artwork };
   enum class Work { Refresh, Catalog, Manifest, Image, Installed, Updates, Tags,
                     Install, Uninstall, Rating, Code, Parental };
   struct SharedProgress {
@@ -151,6 +223,7 @@ struct NestController::Impl {
   Work working = Work::Refresh;
   View working_view = View::Home;
   View view = View::Home, detail_return = View::Catalog, rating_return = View::Detail;
+  View art_return = View::Catalog;
   std::map<std::string, nest::InstalledGame> installed;
   std::map<std::string, int> ratings;
   std::vector<nest::Entry> cached;
@@ -272,9 +345,19 @@ struct NestController::Impl {
   }
   std::string CurrentImage() const {
     const nest::Entry* game = nullptr;
-    if (view == View::Catalog && !catalog.entries.empty())
+    const auto source = view == View::Artwork ? art_return : view;
+    if (source == View::Installed) {
+      const auto games = VisibleInstalled();
+      if (games.empty()) return {};
+      const auto& local = games[std::clamp(installed_selected, 0, static_cast<int>(games.size()) - 1)];
+      if (!local.icon_url.empty()) return local.icon_url;
+      for (const auto& entry : cached)
+        if (entry.slug == local.id || entry.id == local.id) return entry.icon_url;
+      return {};
+    }
+    if (source == View::Catalog && !catalog.entries.empty())
       game = &catalog.entries[std::clamp(catalog_selected, 0, static_cast<int>(catalog.entries.size()) - 1)];
-    else if ((view == View::Detail || view == View::Remove) && manifest) game = &*manifest;
+    else if ((source == View::Detail || source == View::Remove) && manifest) game = &*manifest;
     if (!game) return {};
     if (screenshot > 0 && screenshot <= static_cast<int>(game->screenshot_urls.size()))
       return game->screenshot_urls[screenshot - 1];
@@ -334,6 +417,11 @@ struct NestController::Impl {
       const auto wrapped = Wrap(text);
       result.insert(result.end(), wrapped.begin(), wrapped.end());
     };
+    append(game.title);
+    append(game.description.empty() ? "No description available." : game.description);
+    append("VERSION " + game.version);
+    if (game.download.size_bytes) append(Size(game.download.size_bytes));
+    append(Rating(game.rating));
     if (!game.author.empty()) append("BY " + game.author);
     if (!game.release_date.empty()) append("RELEASED " + game.release_date.substr(0, 10));
     if (game.rating_count > 0) append(std::to_string(game.rating_count) + " PLAYER RATINGS");
@@ -341,7 +429,6 @@ struct NestController::Impl {
     for (const auto& tag : game.tags) { if (!tags_text.empty()) tags_text += " / "; tags_text += tag; }
     if (!tags_text.empty()) append(tags_text);
     if (game.mature_content) append("MATURE CONTENT / 18+");
-    append(game.description.empty() ? "No description available." : game.description);
     for (const auto& release : game.changelog) {
       append("VERSION " + release.version + (release.date.empty() ? "" : " / " + release.date));
       for (const auto& note : release.notes) append("- " + note);
@@ -434,14 +521,14 @@ struct NestController::Impl {
   }
   void DrawArt(render::Surface240& surface, const render::Theme& theme,
                const render::Rect bounds) const {
-    surface.FillRect(bounds.x, bounds.y, bounds.w, bounds.h, theme.bg);
+    surface.FillRect(bounds.x, bounds.y, bounds.w, bounds.h, kNestBackground);
     surface.StrokeRect(bounds.x, bounds.y, bounds.w, bounds.h, theme.panel_border);
     const auto url = CurrentImage();
     const auto found = image_paths.find(url);
     if (found != image_paths.end() && !found->second.empty()) {
       std::string ignored;
       if (const auto* image = images.LoadImage(found->second, ignored)) {
-        render::BlitImageFit(surface, *image, bounds, theme.bg); return;
+        render::BlitImageFit(surface, *image, bounds, kNestBackground); return;
       }
     }
     NestMark(surface, theme, bounds.x + bounds.w / 2 - 22,
@@ -492,7 +579,8 @@ bool NestController::HandleButton(const Button button) {
       s.progress_stage = "Cancelling safely...";
       return false;
     }
-    if (s.view == View::Detail) s.view = s.detail_return;
+    if (s.view == View::Artwork) s.view = s.art_return;
+    else if (s.view == View::Detail) s.view = s.detail_return;
     else if (s.view == View::Rating) s.view = s.rating_return;
     else if (s.view == View::Remove || s.view == View::Transfer) s.view = View::Detail;
     else if (s.view == View::Filters) s.view = View::Catalog;
@@ -503,6 +591,18 @@ bool NestController::HandleButton(const Button button) {
   }
   if (s.Loading()) return false;
   const int delta = button == Button::Up ? -1 : button == Button::Down ? 1 : 0;
+  if (s.view == View::Artwork) {
+    int count = 0;
+    if (s.art_return == View::Catalog && !s.catalog.entries.empty())
+      count = static_cast<int>(s.catalog.entries[s.catalog_selected].screenshot_urls.size());
+    else if (s.art_return == View::Detail && s.manifest)
+      count = static_cast<int>(s.manifest->screenshot_urls.size());
+    if (button == Button::Left || button == Button::Right) {
+      s.screenshot = std::clamp(s.screenshot + (button == Button::Right ? 1 : -1), 0, count);
+      s.FetchImage();
+    }
+    return false;
+  }
   if (s.view == View::Home) {
     if (delta) s.home_selected = Move(s.home_selected, delta, 6);
     if (button != Button::A) return false;
@@ -522,7 +622,11 @@ bool NestController::HandleButton(const Button button) {
   }
   if (s.view == View::Catalog) {
     if (button == Button::Start || button == Button::Y) { s.OpenFilters(); return false; }
-    if (button == Button::X) { s.FetchCatalog(s.query.page); return false; }
+    if (button == Button::X) {
+      if (!s.error.empty() || s.catalog.entries.empty()) s.FetchCatalog(s.query.page);
+      else { s.art_return = s.view; s.view = View::Artwork; s.FetchImage(); }
+      return false;
+    }
     if (button == Button::L && s.query.page > 1) s.FetchCatalog(s.query.page - 1);
     else if (button == Button::R && s.query.page < s.catalog.total_pages) s.FetchCatalog(s.query.page + 1);
     if (s.catalog.entries.empty()) return false;
@@ -543,7 +647,11 @@ bool NestController::HandleButton(const Button button) {
     const auto games = s.VisibleInstalled();
     if (games.empty()) return false;
     s.installed_selected = std::clamp(s.installed_selected, 0, static_cast<int>(games.size()) - 1);
-    if (delta) s.installed_selected = Move(s.installed_selected, delta, static_cast<int>(games.size()));
+    if (delta) {
+      s.installed_selected = Move(s.installed_selected, delta, static_cast<int>(games.size()));
+      s.message.clear();
+      s.FetchImage();
+    }
     const auto& game = games[s.installed_selected];
     if (button == Button::A) s.Details(game.id, View::Installed);
     if (button == Button::Y) {
@@ -564,7 +672,10 @@ bool NestController::HandleButton(const Button button) {
   if (s.view == View::Detail) {
     if (!s.manifest) return false;
     if (delta) s.scroll = std::clamp(s.scroll + delta, 0,
-        std::max(0, static_cast<int>(s.DetailLines().size()) - 5));
+        std::max(1, static_cast<int>(s.DetailLines().size()) - kDetailRows + 1));
+    if (button == Button::Select) {
+      s.art_return = s.view; s.view = View::Artwork; s.FetchImage(); return false;
+    }
     if (button == Button::Left || button == Button::Right) {
       s.screenshot = std::clamp(s.screenshot + (button == Button::Right ? 1 : -1),
                                0, static_cast<int>(s.manifest->screenshot_urls.size()));
@@ -697,206 +808,221 @@ bool NestController::Tick() {
   if (blocked_manifest && s.view == Impl::View::Detail) s.error = "Mature content is locked. Enter your PIN in parental controls.";
   if (s.pending) {
     auto job = std::move(*s.pending); s.pending.reset(); s.Start(std::move(job));
-  } else if ((result.kind == Work::Catalog || result.kind == Work::Manifest) && result.error.empty()) s.FetchImage();
+  } else if ((result.kind == Work::Catalog || result.kind == Work::Manifest || result.kind == Work::Installed) && result.error.empty()) s.FetchImage();
   return true;
 }
 
 void NestController::Draw(render::Surface240& surface, const render::Theme& theme) const {
   const auto& s = *impl_;
   using View = Impl::View;
-  std::string title = "GAME BIRD NEST";
+  std::string title = "NEST";
   switch (s.view) {
-    case View::Catalog: title = "NEST / DISCOVER"; break;
-    case View::Detail: title = "NEST / GAME DETAILS"; break;
-    case View::Installed: title = "NEST / INSTALLED"; break;
-    case View::Updates: title = "NEST / GAME UPDATES"; break;
-    case View::Filters: title = "NEST / FILTERS"; break;
-    case View::Parental: case View::Pin: title = "NEST / PARENTAL CONTROLS"; break;
-    case View::Developer: title = "NEST / DEVELOPER CODE"; break;
-    case View::Transfer: title = "NEST / " + std::string(s.working == Impl::Work::Uninstall ? "REMOVE GAME" : "INSTALL GAME"); break;
-    case View::Remove: title = "NEST / REMOVE GAME"; break;
-    case View::Rating: title = "NEST / RATE GAME"; break;
+    case View::Installed: title = "INSTALLED"; break;
+    case View::Updates: title = "GAME UPDATES"; break;
+    case View::Filters: title = "FILTERS"; break;
+    case View::Parental: title = "FAMILY FILTER"; break;
+    case View::Pin: title = "PARENTAL PIN"; break;
+    case View::Developer: title = "LINK ACCOUNT"; break;
+    case View::Transfer:
+      title = s.Active() ? (s.working == Impl::Work::Uninstall ? "REMOVING" : "INSTALLING") :
+          !s.error.empty() ? "REQUEST FAILED" : s.working == Impl::Work::Uninstall ? "REMOVED" : "READY";
+      break;
+    case View::Remove: title = "REMOVE GAME"; break;
+    case View::Rating: title = "RATE GAME"; break;
     default: break;
   }
-  DrawMenuFrame(surface, theme, title);
+  Frame(surface, theme, title);
   if (s.external_error) {
-    Message(surface, theme, "COULD NOT COMPLETE REQUEST", s.error);
-    DrawMenuFooter(surface, theme, "B:BACK"); return;
+    Message(surface, theme, "REQUEST FAILED", s.error);
+    Footer(surface, theme, "B Back"); return;
   }
   if (s.Loading()) {
-    NestMark(surface, theme, 98, 63, 2);
-    Message(surface, theme, s.view == View::Installed ? "SYNCING YOUR GAMES" : "LOADING...", "B returns immediately");
-    DrawMenuFooter(surface, theme, "B:BACK"); return;
+    NestMark(surface, theme, 98, 42, 2);
+    Center(surface, 110, "LOADING...", theme.text, 2);
+    Center(surface, 150, "Please wait", kNestMuted);
+    Footer(surface, theme, "B Back"); return;
   }
   if (s.view == View::Home) {
-    NestMark(surface, theme, 22, 38, 1);
-    DrawContentText(surface, 52, 39, "A home for indie games", theme.text);
-    DrawContentText(surface, 52, 51, s.parental_locked ? "FAMILY FILTER ON" : "DISCOVER SOMETHING NEW", theme.text);
-    const std::vector<std::string> rows = {"Browse catalog", "Installed games", "Check for game updates", "Parental controls", "Developer code", "Back to Game Bird"};
-    widgets::DrawList(surface, 16, 70, 208, 132, 22, rows, s.home_selected, theme);
-    DrawMenuFooter(surface, theme, "A:OPEN  B:GAME BIRD"); return;
+    Frame(surface, theme, "NEST", std::to_string(s.home_selected + 1) + "/6");
+    Read(surface, 8, 33, s.parental_locked ? "Family filter is on" : "Find your next game", kNestMuted);
+    ReadList(surface, theme, {"Browse games", "Installed games", "Game updates", "Family filter", "Developer code", "Back to shell"}, s.home_selected);
+    Footer(surface, theme, "A Open  B Shell", "UP/DOWN Scroll"); return;
   }
   if (!s.error.empty() && s.view != View::Parental && s.view != View::Pin && s.view != View::Transfer) {
-    Message(surface, theme, "COULD NOT COMPLETE REQUEST", s.error);
-    DrawMenuFooter(surface, theme, s.view == View::Catalog || s.view == View::Updates ? "X:RETRY  B:BACK" : "B:BACK"); return;
+    Message(surface, theme, "REQUEST FAILED", s.error);
+    Footer(surface, theme, s.view == View::Catalog || s.view == View::Updates ? "X Retry  B Back" : "B Back"); return;
   }
+  const auto featured = [&](const std::string& name) {
+    const auto names = Wrap(name, 18);
+    const int art_height = names.size() > 1 ? 136 : 152;
+    s.DrawArt(surface, theme, {8, 28, 224, art_height});
+    for (int row = 0; row < std::min(2, static_cast<int>(names.size())); ++row) {
+      std::string line = names[row];
+      if (row == 1 && names.size() > 2) line = FitLabel(line + "...", 216, 2);
+      Large(surface, 8, 34 + art_height + row * 16, line, theme.text);
+    }
+  };
   if (s.view == View::Catalog) {
     if (s.catalog.entries.empty()) {
-      Message(surface, theme, "NO GAMES FOUND", "Try changing your filters or connect to Wi-Fi.");
-      DrawMenuFooter(surface, theme, "START:FILTERS X:RETRY B:BACK"); return;
+      Message(surface, theme, "NO GAMES FOUND", "Change your filters or connect to Wi-Fi.");
+      Footer(surface, theme, "Y Filters  X Retry", "B Back"); return;
     }
-    const auto& game = s.catalog.entries[s.catalog_selected];
-    const int count = static_cast<int>(s.query.tags.size()) + (s.query.min_rating ? 1 : 0);
-    DrawContentText(surface, 16, 35, s.catalog.offline ? "OFFLINE / SAVED CATALOG" : "DISCOVER INDIE GAMES", theme.text);
-    DrawContentText(surface, 16, 47, "PAGE " + std::to_string(s.query.page) + "/" + std::to_string(s.catalog.total_pages) + (count ? "  FILTERS " + std::to_string(count) : ""), theme.text_dim);
-    s.DrawArt(surface, theme, {16, 61, 208, 90});
-    if (game.rating) {
-      surface.FillRect(163, 65, 57, 13, theme.panel);
-      DrawText(surface, 167, 68, Rating(game.rating), theme.text);
-    }
+    const int selected = std::clamp(s.catalog_selected, 0, static_cast<int>(s.catalog.entries.size()) - 1);
+    const auto& game = s.catalog.entries[selected];
+    const auto counter = std::string(s.catalog.offline ? "OFFLINE " : "") +
+        std::to_string(selected + 1) + "/" + std::to_string(s.catalog.entries.size()) +
+        (s.catalog.total_pages > 1 ? " P" + std::to_string(s.query.page) + "/" + std::to_string(s.catalog.total_pages) : "");
+    Frame(surface, theme, "NEST", counter);
+    featured(game.title);
     if (game.mature_content) {
-      surface.FillRect(20, 133, 80, 13, theme.panel);
-      DrawText(surface, 24, 136, "MATURE 18+", theme.text);
+      surface.FillRect(10, 30, 35, 15, kNestBackground);
+      Read(surface, 14, 32, "18+", theme.text);
     }
-    if (!game.screenshot_urls.empty()) {
-      const auto text = s.screenshot == 0 ? "ART  < >" : "SHOT " + std::to_string(s.screenshot) + " < >";
-      surface.FillRect(143, 133, 77, 13, theme.panel);
-      DrawText(surface, 147, 136, text, theme.text);
-    }
-    const int first = std::clamp(s.catalog_selected - 1, 0, std::max(0, static_cast<int>(s.catalog.entries.size()) - 3));
-    for (int row = 0; row < 3 && first + row < static_cast<int>(s.catalog.entries.size()); ++row) {
-      const int i = first + row, y = 155 + row * 17;
-      const bool active = i == s.catalog_selected;
-      surface.FillRect(16, y, 208, 15, active ? theme.accent : theme.bg);
-      DrawText(surface, 22, y + 4, FitLabel(s.catalog.entries[i].title, 194), theme.text_dim);
-    }
-    DrawMenuFooter(surface, theme, "A:DETAILS START:FILTER L/R:PAGE B:BACK"); return;
+    Footer(surface, theme, "A Details X Art B Back",
+           s.catalog.total_pages > 1 ? "U/D Game Y Filter L/R Pg" : "UP/DOWN Game  Y Filter");
+    return;
+  }
+  if (s.view == View::Artwork) {
+    surface.Clear(kNestBackground);
+    s.DrawArt(surface, theme, {8, 4, 224, 212});
+    int count = 1;
+    if (s.art_return == View::Catalog && !s.catalog.entries.empty())
+      count += static_cast<int>(s.catalog.entries[s.catalog_selected].screenshot_urls.size());
+    else if (s.art_return == View::Detail && s.manifest)
+      count += static_cast<int>(s.manifest->screenshot_urls.size());
+    Read(surface, 8, 225, "< " + std::to_string(s.screenshot + 1) + "/" + std::to_string(count) + " > Images  B Back", theme.text);
+    return;
   }
   if (s.view == View::Detail && s.manifest) {
     const auto& game = *s.manifest;
     const auto* local = s.InstalledDetail();
-    DrawContentText(surface, 16, 37, game.title, theme.text);
-    s.DrawArt(surface, theme, {16, 52, 86, 70});
-    DrawText(surface, 112, 56, FitLabel("v" + game.version, 110), theme.text_dim);
-    Stars(surface, theme, 111, 73, game.rating ? static_cast<int>(std::round(*game.rating)) : 0);
-    DrawText(surface, 112, 91, Rating(game.rating), theme.text);
-    DrawText(surface, 112, 106, local ? (s.HasUpdate() ? "UPDATE READY" : "INSTALLED") : Size(game.download.size_bytes), theme.text);
-    const auto lines = s.DetailLines();
-    for (int row = 0; row < 5 && s.scroll + row < static_cast<int>(lines.size()); ++row)
-      DrawText(surface, 16, 130 + row * 12, lines[s.scroll + row], theme.text);
-    if (!s.message.empty()) DrawContentText(surface, 16, 195, s.message, theme.text);
-    else if (lines.size() > 5) DrawContentText(surface, 16, 195, "UP/DOWN:READ MORE  <>:ART", theme.text_dim);
-    else if (!game.screenshot_urls.empty()) DrawContentText(surface, 16, 195, "LEFT/RIGHT:VIEW SCREENSHOTS", theme.text_dim);
-    DrawMenuFooter(surface, theme, !local ? "A:INSTALL  B:BACK" : s.HasUpdate() ? "A:UPDATE X:REMOVE Y:RATE B:BACK" : "A:PLAY X:REMOVE Y:RATE B:BACK"); return;
+    Frame(surface, theme, "GAME", local ? (s.HasUpdate() ? "UPDATE" : "INSTALLED") : "");
+    if (s.scroll == 0) {
+      featured(game.title);
+    } else {
+      const auto names = Wrap(game.title, 18);
+      for (int row = 0; row < std::min(2, static_cast<int>(names.size())); ++row)
+        Large(surface, 8, 34 + row * 16, names[row], theme.text);
+      const auto lines = s.DetailLines();
+      const int first = s.scroll - 1;
+      for (int row = 0; row < kDetailRows && first + row < static_cast<int>(lines.size()); ++row)
+        Read(surface, 8, 70 + row * 16, lines[first + row], theme.text);
+      const int last = std::max(0, static_cast<int>(lines.size()) - kDetailRows);
+      if (last > 0) {
+        surface.FillRect(235, 70, 2, 123, theme.panel_border);
+        const int thumb = std::max(12, 123 * kDetailRows / static_cast<int>(lines.size()));
+        surface.FillRect(235, 70 + (123 - thumb) * first / last, 2, thumb, theme.text);
+      }
+    }
+    const auto action = !local ? "A Install" : s.HasUpdate() ? "A Update" : "A Play";
+    Footer(surface, theme, action + std::string(local ? " X Remove B Back" : "  B Back"),
+           local ? "U/D Info Y Rate SEL Art" : "UP/DOWN Info  SEL Art");
+    return;
   }
   if (s.view == View::Installed) {
     const auto games = s.VisibleInstalled();
-    DrawContentText(surface, 16, 38, std::to_string(games.size()) + " GAMES READY TO PLAY", theme.text_dim);
-    if (games.empty()) Message(surface, theme,
-        s.parental_locked && !s.installed.empty() ? "FAMILY FILTER IS ON" : "YOUR NEST IS EMPTY",
-        s.parental_locked && !s.installed.empty() ? "Unlock parental controls to view all your games." : "Find your next game in Browse catalog.");
-    const int selected = std::clamp(s.installed_selected, 0, std::max(0, static_cast<int>(games.size()) - 1));
-    const int first = std::clamp(selected - 2, 0, std::max(0, static_cast<int>(games.size()) - 5));
-    for (int row = 0; row < 5 && first + row < static_cast<int>(games.size()); ++row) {
-      const int i = first + row, y = 56 + row * 28;
-      const bool active = i == selected;
-      surface.FillRect(16, y, 208, 25, active ? theme.accent : theme.bg);
-      const auto& game = games[i];
-      DrawText(surface, 22, y + 4, FitLabel(game.title, 194), theme.text);
-      std::string sub = "v" + game.installed_version;
-      const auto rating = s.ratings.find(game.id);
-      if (rating != s.ratings.end()) sub += "    YOUR RATING " + std::to_string(rating->second) + "/5";
-      DrawText(surface, 22, y + 15, FitLabel(sub, 194), theme.text_dim);
+    if (games.empty()) {
+      Message(surface, theme, s.parental_locked && !s.installed.empty() ? "FAMILY FILTER ON" : "NO INSTALLED GAMES",
+              s.parental_locked && !s.installed.empty() ? "Unlock the family filter to see your games." : "Browse Nest to find your next game.");
+      Footer(surface, theme, "B Back"); return;
     }
-    if (!s.message.empty()) DrawContentText(surface, 16, 199, s.message, theme.text);
-    DrawMenuFooter(surface, theme, "A:DETAILS X:PLAY Y:RATE B:BACK"); return;
+    const int selected = std::clamp(s.installed_selected, 0, static_cast<int>(games.size()) - 1);
+    Frame(surface, theme, "MY GAMES", std::to_string(selected + 1) + "/" + std::to_string(games.size()));
+    featured(games[selected].title);
+    Footer(surface, theme, "A Details X Play B Back", s.message.empty() ? "UP/DOWN Game  Y Rate" : s.message); return;
   }
   if (s.view == View::Updates) {
-    DrawContentText(surface, 16, 39, std::to_string(s.updates.size()) + " UPDATES AVAILABLE", theme.text_dim);
-    if (s.updates.empty()) Message(surface, theme, "YOU ARE UP TO DATE", "All your installed games are current.");
+    if (s.updates.empty()) {
+      Message(surface, theme, "ALL UP TO DATE", "Your installed games are current.");
+      Footer(surface, theme, "X Check again  B Back"); return;
+    }
+    Frame(surface, theme, "UPDATES", std::to_string(s.update_selected + 1) + "/" + std::to_string(s.updates.size()));
     std::vector<std::string> rows;
     for (const auto& item : s.updates) rows.push_back(item.title);
-    widgets::DrawList(surface, 16, 60, 208, 120, 24, rows, s.update_selected, theme);
-    if (!s.updates.empty()) {
-      const auto& item = s.updates[std::clamp(s.update_selected, 0, static_cast<int>(s.updates.size()) - 1)];
-      DrawContentText(surface, 16, 192, "v" + item.installed_version + " > v" + item.latest_version, theme.text);
-    }
-    DrawMenuFooter(surface, theme, "A:VIEW UPDATE X:CHECK B:BACK"); return;
+    ReadList(surface, theme, rows, s.update_selected, 40);
+    const auto& item = s.updates[std::clamp(s.update_selected, 0, static_cast<int>(s.updates.size()) - 1)];
+    Read(surface, 8, 193, item.installed_version + " > " + item.latest_version, kNestMuted);
+    Footer(surface, theme, "A Details  B Back", "UP/DOWN Scroll  X Check"); return;
   }
   if (s.view == View::Filters) {
     const int count = static_cast<int>(s.draft_tags.size()) + (s.draft_rating ? 1 : 0);
-    DrawContentText(surface, 16, 38, std::to_string(count) + " FILTERS SELECTED", theme.text_dim);
+    Read(surface, 8, 33, std::to_string(count) + " selected", kNestMuted);
     std::vector<std::string> rows{"Apply filters"};
     for (int value = 3; value <= 5; ++value)
       rows.push_back(std::string(s.draft_rating == value ? "[X] " : "[ ] ") + std::to_string(value) + (value < 5 ? "+ stars" : " stars"));
     for (const auto& tag : s.tags)
       rows.push_back(std::string(std::find(s.draft_tags.begin(), s.draft_tags.end(), tag.id) != s.draft_tags.end() ? "[X] " : "[ ] ") + tag.name);
-    widgets::DrawList(surface, 16, 56, 208, 126, 18, rows, s.filter_selected, theme);
-    if (s.filter_selected >= 4 && s.filter_selected - 4 < static_cast<int>(s.tags.size()))
-      DrawContentText(surface, 16, 194, s.tags[s.filter_selected - 4].category, theme.text_dim);
-    DrawMenuFooter(surface, theme, "A:TOGGLE START:APPLY X:CLEAR B:BACK"); return;
+    ReadList(surface, theme, rows, s.filter_selected);
+    Footer(surface, theme, "A Toggle START Apply", "UP/DOWN Scroll X Clear"); return;
   }
   if (s.view == View::Parental) {
-    DrawContentText(surface, 16, 42, s.parental_enabled ? (s.parental_locked ? "FAMILY FILTER ON" : "UNLOCKED THIS SESSION") : "PARENTAL PIN NOT SET", theme.text);
-    const auto explanation = Wrap(s.parental_enabled ? "Mature games stay hidden in Nest until the PIN is entered. Leaving Nest locks it again." : "Set a four digit PIN to hide mature games inside Nest.");
-    for (int i = 0; i < static_cast<int>(explanation.size()); ++i) DrawText(surface, 16, 62 + 12 * i, explanation[i], theme.text_dim);
+    Read(surface, 8, 34, s.parental_enabled ? (s.parental_locked ? "Filter on" : "Unlocked this visit") : "No PIN set", theme.text);
+    const auto copy = !s.error.empty() ? s.error : !s.message.empty() ? s.message :
+        s.parental_enabled ? "Mature games stay hidden until you enter the PIN. Leaving Nest locks it." : "Set a four digit PIN to hide mature games.";
+    const auto explanation = Wrap(copy);
+    for (int i = 0; i < std::min(3, static_cast<int>(explanation.size())); ++i)
+      Read(surface, 8, 56 + 16 * i, explanation[i], kNestMuted);
     std::vector<std::string> rows;
     if (!s.parental_enabled) rows = {"Set parental PIN", "Back"};
     else if (s.parental_locked) rows = {"Unlock with PIN", "Back"};
     else rows = {"Lock now", "Remove PIN", "Back"};
-    widgets::DrawList(surface, 16, 110, 208, 66, 22, rows, s.parental_selected, theme);
-    DrawContentText(surface, 16, 188, s.error.empty() ? s.message : s.error, theme.text);
-    DrawMenuFooter(surface, theme, "A:SELECT  B:BACK");
-    return;
+    ReadList(surface, theme, rows, s.parental_selected, 112, 30);
+    Footer(surface, theme, "A Select  B Back"); return;
   }
   if (s.view == View::Pin) {
-    Center(surface, 54, s.confirming_pin ? "CONFIRM YOUR PIN" : s.pin_action == "set" ? "CHOOSE A FOUR DIGIT PIN" : "ENTER YOUR PIN", theme.text);
+    Center(surface, 42, s.confirming_pin ? "Confirm your PIN" : s.pin_action == "set" ? "Choose four digits" : "Enter your PIN", theme.text);
     const auto& digits = s.confirming_pin ? s.confirmation : s.pin;
     for (int i = 0; i < 4; ++i) {
-      const int x = 39 + i * 42;
-      surface.FillRect(x, 87, 34, 42, i == s.pin_cursor ? theme.accent : theme.bg);
-      surface.StrokeRect(x, 87, 34, 42, i == s.pin_cursor ? theme.text : theme.panel_border);
-      DrawText(surface, x + 11, 102, std::to_string(digits[i]), theme.text, 2);
+      const int x = 22 + i * 50;
+      surface.FillRect(x, 74, 44, 54, i == s.pin_cursor ? theme.accent : kNestPanel);
+      surface.StrokeRect(x, 74, 44, 54, i == s.pin_cursor ? theme.text : theme.panel_border);
+      Large(surface, x + 16, 94, std::to_string(digits[i]), theme.text);
     }
-    Center(surface, 148, "UP/DOWN:CHANGE DIGIT", theme.text_dim);
-    Center(surface, 164, "LEFT/RIGHT:MOVE", theme.text_dim);
-    if (!s.error.empty()) Center(surface, 188, s.error, theme.text);
-    DrawMenuFooter(surface, theme, "A:CONFIRM  B:CANCEL"); return;
+    Center(surface, 148, "UP/DOWN Change digit", kNestMuted);
+    Center(surface, 170, "LEFT/RIGHT Move", kNestMuted);
+    if (!s.error.empty()) Read(surface, 8, 190, s.error, theme.text);
+    Footer(surface, theme, "A Confirm  B Cancel"); return;
   }
   if (s.view == View::Developer) {
-    Center(surface, 53, "LINK YOUR DEVELOPER ACCOUNT", theme.text);
-    surface.FillRect(28, 82, 184, 48, theme.bg);
-    surface.StrokeRect(28, 82, 184, 48, theme.panel_border);
-    Center(surface, 99, s.code.empty() ? "NO CODE RECEIVED" : s.code, theme.text, 2);
-    Center(surface, 151, "Enter this code on the", theme.text_dim);
-    Center(surface, 166, "Game Bird website to link", theme.text_dim);
-    Center(surface, 181, "this device to your account.", theme.text_dim);
-    DrawMenuFooter(surface, theme, "B:BACK"); return;
+    Center(surface, 48, "Your linking code", kNestMuted);
+    surface.FillRect(8, 76, 224, 48, kNestPanel);
+    Center(surface, 93, s.code.empty() ? "NO CODE" : s.code, theme.text, 2);
+    const auto lines = Wrap("Enter this code on the Game Bird website to link your account.");
+    for (int i = 0; i < std::min(4, static_cast<int>(lines.size())); ++i)
+      Read(surface, 8, 142 + i * 16, lines[i], kNestMuted);
+    Footer(surface, theme, "B Back"); return;
   }
   if (s.view == View::Transfer) {
-    Center(surface, 50, s.manifest ? s.manifest->title : "GAME BIRD NEST", theme.text);
-    NestMark(surface, theme, 98, 71, 2);
-    widgets::DrawProgress(surface, theme, 123, s.progress_percent, s.transfer_success);
-    Center(surface, 146, s.Active() ? s.progress_stage : s.error.empty() ? "COMPLETE" : "COULD NOT FINISH", theme.text);
-    const auto lines = Wrap(s.error.empty() ? s.message : s.error);
-    for (int i = 0; i < std::min(3, static_cast<int>(lines.size())); ++i) Center(surface, 164 + i * 12, lines[i], theme.text_dim);
-    DrawMenuFooter(surface, theme, s.Active() ? "B:CANCEL" : "A:CONTINUE  B:BACK"); return;
+    const auto name = Wrap(s.manifest ? s.manifest->title : "Game Bird Nest", 18);
+    for (int i = 0; i < std::min(2, static_cast<int>(name.size())); ++i)
+      Large(surface, 8, 38 + i * 18, name[i], theme.text);
+    Center(surface, 84, std::to_string(s.progress_percent) + "%", theme.text, 2);
+    surface.FillRect(8, 111, 224, 18, kNestPanel);
+    surface.FillRect(10, 113, 220 * std::clamp(s.progress_percent, 0, 100) / 100, 14,
+                     s.transfer_success ? theme.success : theme.accent);
+    const auto status = s.Active() ? s.progress_stage : !s.error.empty() ? "Could not finish" :
+        s.working == Impl::Work::Uninstall ? "Game removed" : "Ready to play";
+    const auto lines = Wrap(s.error.empty() ? status : s.error);
+    for (int i = 0; i < std::min(4, static_cast<int>(lines.size())); ++i)
+      Read(surface, 8, 141 + i * 16, lines[i], i == 0 ? theme.text : kNestMuted);
+    Footer(surface, theme, s.Active() ? "B Cancel" : "A Continue  B Back"); return;
   }
   if (s.view == View::Remove) {
     Message(surface, theme, "REMOVE THIS GAME?", s.manifest ? s.manifest->title : "");
-    Center(surface, 166, "Downloaded game files are removed.", theme.text_dim);
-    DrawMenuFooter(surface, theme, "A:REMOVE  B:KEEP GAME"); return;
+    Read(surface, 8, 171, "Your saves are kept.", kNestMuted);
+    Footer(surface, theme, "A Remove  B Keep game"); return;
   }
   if (s.view == View::Rating) {
-    Center(surface, 54, s.rating_title, theme.text);
-    Center(surface, 79, "HOW WAS YOUR GAME?", theme.text_dim);
-    Stars(surface, theme, 42, 111, s.pending_rating, 2);
-    Center(surface, 149, std::to_string(s.pending_rating) + " / 5", theme.text);
-    Center(surface, 178, "LEFT/RIGHT:CHOOSE RATING", theme.text_dim);
-    DrawMenuFooter(surface, theme, "A:SAVE RATING  B:CANCEL"); return;
+    const auto names = Wrap(s.rating_title, 18);
+    for (int i = 0; i < std::min(2, static_cast<int>(names.size())); ++i)
+      Large(surface, 8, 38 + i * 18, names[i], theme.text);
+    Center(surface, 87, "How was your game?", kNestMuted);
+    Stars(surface, theme, 42, 113, s.pending_rating, 2);
+    Center(surface, 153, std::to_string(s.pending_rating) + " / 5", theme.text, 2);
+    Footer(surface, theme, "A Save  B Cancel", "LEFT/RIGHT Choose"); return;
   }
   Message(surface, theme, "NO GAME SELECTED");
-  DrawMenuFooter(surface, theme, "B:BACK");
+  Footer(surface, theme, "B Back");
 }
 
 bool NestController::TakeLibraryChanged() {
