@@ -44,7 +44,8 @@ int main(int argc, char** argv) {
   DrawTools(s,t,{"Wi-Fi","Bluetooth","Input setup","Live input test","Scrape library","System update"},5,""); save("06-tools");
   DrawDetails(s,t,"The Legend of Zelda: A Link to the Past","Super Nintendo","zelda-a-link-to-the-past.sfc",1991,"Action adventure",1,"Libretro","",true,false,""); save("07-details");
   DrawScrapeProgress(s,t,24,42,20,2,2,false,"Super Metroid","Downloading artwork"); save("08-scrape");
-  DrawUpdate(s,t,"INSTALLING",62,12,true,true,"Installing system packages. Please wait."); save("09-update");
+  DrawUpdate(s,t,"INSTALLING",62,12,true,true,"Installing system packages. Please wait.",
+             "c8cf121789", "c8cf121789", "a123456789", 600); save("09-update");
   DrawWifi(s,t,WifiView::Overview,"GameBird Home",80,true,"US",{},0,"",0,""); save("10-wifi");
   DrawWifi(s,t,WifiView::Networks,"GameBird Home",80,true,"US",{{"GameBird Home",80,true,true},{"A very long wireless network name",40,true,false}},1,"",0,""); save("11-networks");
   DrawWifi(s,t,WifiView::Password,"GameBird Home",80,true,"US",{},8,"password",0,""); save("12-password");

@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <chrono>
+#include <iostream>
 #include <functional>
 #include <memory>
 #include <set>
@@ -48,6 +51,7 @@ constexpr std::uint64_t kPostLaunchInputBlockMs = 1200;
 constexpr std::uint16_t kLinuxKeyEsc = 1;
 
 struct Args {
+  bool version = false;
   std::string presenter = "sdl";
   std::string db_path = "./data/catalog.db";
   std::string gblaunch = "gblaunch";
@@ -334,6 +338,9 @@ struct UpdateStatus {
   int os_updates = 0;
   bool shell_update = false;
   bool reboot_required = false;
+  std::string installed_commit;
+  std::string remote_commit;
+  std::string operation_id;
 };
 
 struct LibraryState {
@@ -379,6 +386,16 @@ struct LibraryState {
   std::uint64_t update_last_read_ms = 0;
   std::uint64_t update_notice_until_ms = 0;
   bool update_notice_announced = false;
+  // Input handlers only queue work. The loop presents the busy screen first.
+  bool update_action_pending = false;
+  bool update_action_install = false;
+  bool update_waiting_for_status = false;
+  bool update_status_guard = false;
+  std::string update_previous_operation;
+  std::uint64_t update_start_ms = 0;
+  std::future<gb::platform::ProcessResult> update_start_result;
+  int pending_tool_action = -1;
+  bool pending_scrape_begin = false;
   bool tv_mode = false;
   bool tv_external_controller = false;
   std::uint64_t tv_mode_notice_until_ms = 0;
@@ -493,6 +510,10 @@ Args ParseArgs(const int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i];
+    if (arg == "--version") {
+      out.version = true;
+      continue;
+    }
     if (arg == "--presenter" && i + 1 < argc) {
       out.presenter = argv[++i];
       continue;
@@ -1320,14 +1341,16 @@ bool UpdateIsBusy(const UpdateStatus& update) {
          phase == "preparing" || phase == "downloading" ||
          phase == "updating pi os" || phase == "building gamebird" ||
          phase == "installing gamebird" || phase == "finalizing" ||
+         phase == "verifying gamebird" ||
          phase == "rebooting";
 }
 
-bool ReadUpdateStatus(LibraryState& lib) {
-  std::ifstream input("/data/gamebird-update/status");
-  if (!input) return false;
-
+UpdateStatus ParseUpdateStatus(std::istream& input,
+                              const std::string& current_boot_id,
+                              const std::uint64_t boot_time) {
   UpdateStatus next;
+  std::string status_boot_id;
+  std::uint64_t checked_at = 0;
   std::string line;
   while (std::getline(input, line)) {
     const auto equals = line.find('=');
@@ -1341,24 +1364,53 @@ bool ReadUpdateStatus(LibraryState& lib) {
       else if (key == "os_updates") next.os_updates = std::max(0, std::stoi(value));
       else if (key == "shell_update") next.shell_update = value == "1";
       else if (key == "reboot_required") next.reboot_required = value == "1";
+      else if (key == "boot_id") status_boot_id = value;
+      else if (key == "checked_at") checked_at = std::stoull(value);
+      else if (key == "installed_commit") next.installed_commit = value;
+      else if (key == "remote_commit") next.remote_commit = value;
+      else if (key == "operation_id") next.operation_id = value;
     } catch (...) {
       // Ignore a partially written or malformed field. The updater publishes
       // with atomic rename, so this is only defensive against manual edits.
     }
   }
 
+  // Progress lives on /data across reboots. An old REBOOTING (or interrupted
+  // install) must not lock the controls or prevent a fresh check on this boot.
+  // Older updaters have no boot ID, so fall back to their timestamp.
+  const bool previous_boot = !status_boot_id.empty() && !current_boot_id.empty()
+      ? status_boot_id != current_boot_id
+      : checked_at > 0 && boot_time > 0 && checked_at < boot_time;
+  if (previous_boot && UpdateIsBusy(next)) {
+    const bool completed = ToLower(next.phase) == "rebooting";
+    next.phase = "READY";
+    next.progress = next.os_updates = 0;
+    next.shell_update = next.reboot_required = false;
+    next.message = completed ? "Restarted; verifying installation"
+                             : "Update interrupted; check again";
+  }
+  return next;
+}
+
+bool ApplyUpdateStatus(LibraryState& lib, UpdateStatus next) {
+  if (lib.update_action_pending || lib.update_start_result.valid()) return false;
+  if (lib.update_status_guard) {
+    if (next.operation_id.empty() || next.operation_id == lib.update_previous_operation)
+      return false;
+    lib.update_waiting_for_status = false;
+    lib.update_status_guard = false;
+  }
   const bool changed = next.phase != lib.update_status.phase ||
                        next.message != lib.update_status.message ||
                        next.progress != lib.update_status.progress ||
                        next.os_updates != lib.update_status.os_updates ||
                        next.shell_update != lib.update_status.shell_update ||
-                       next.reboot_required != lib.update_status.reboot_required;
+                       next.reboot_required != lib.update_status.reboot_required ||
+                       next.installed_commit != lib.update_status.installed_commit ||
+                       next.remote_commit != lib.update_status.remote_commit;
   lib.update_status = std::move(next);
-
-  const bool available = lib.update_status.os_updates > 0 ||
-                         lib.update_status.shell_update;
-  if (available && !UpdateIsBusy(lib.update_status) &&
-      !lib.update_notice_announced) {
+  const bool available = lib.update_status.os_updates > 0 || lib.update_status.shell_update;
+  if (available && !UpdateIsBusy(lib.update_status) && !lib.update_notice_announced) {
     lib.update_notice_until_ms = gb::core::NowMs() + 8000;
     lib.update_notice_announced = true;
   } else if (!available) {
@@ -1367,16 +1419,78 @@ bool ReadUpdateStatus(LibraryState& lib) {
   return changed;
 }
 
-bool StartUpdaterUnit(const std::string& unit, std::string& status) {
-  const auto result = gb::platform::RunProcessBlocking(
-      {"sudo", "-n", "/usr/bin/systemctl", "--no-block", "start", unit});
-  if (!result.launched || result.exit_code != 0) {
-    status = "Updater service unavailable";
-    return false;
+bool ReadUpdateStatus(LibraryState& lib) {
+  std::ifstream input("/data/gamebird-update/status");
+  if (!input) return false;
+
+  static const std::string boot_id = [] {
+    std::ifstream boot("/proc/sys/kernel/random/boot_id");
+    std::string value;
+    std::getline(boot, value);
+    return value;
+  }();
+  static const std::uint64_t boot_time = [] {
+    std::ifstream stat("/proc/stat");
+    std::string line;
+    while (std::getline(stat, line)) {
+      std::istringstream fields(line);
+      std::string key;
+      std::uint64_t value = 0;
+      if (fields >> key >> value && key == "btime") return value;
+    }
+    return std::uint64_t{0};
+  }();
+  UpdateStatus next = ParseUpdateStatus(input, boot_id, boot_time);
+
+  return ApplyUpdateStatus(lib, std::move(next));
+}
+
+void StartUpdateAction(LibraryState& lib, const bool install) {
+  if (lib.update_action_pending || lib.update_start_result.valid() ||
+      lib.update_waiting_for_status) return;
+  lib.update_action_pending = true;
+  lib.update_status_guard = true;
+  lib.update_action_install = install;
+  lib.update_previous_operation = lib.update_status.operation_id;
+  lib.status = install ? "Starting update..." : "Checking for updates...";
+  lib.update_status.phase = install ? "STARTING" : "CHECKING";
+  lib.update_status.message = lib.status;
+  lib.update_status.progress = 0;
+}
+
+// Called only after presenting the queued busy state. Keep sudo/systemctl off
+// the UI thread: even --no-block can wait on service-manager authorization.
+void DispatchUpdateAction(LibraryState& lib) {
+  lib.update_action_pending = false;
+  lib.update_waiting_for_status = true;
+  lib.update_start_ms = gb::core::NowMs();
+  const std::string unit = lib.update_action_install
+      ? "gamebird-update.service" : "gamebird-update-check.service";
+  lib.update_start_result = std::async(std::launch::async, [unit] {
+    return gb::platform::RunProcessBlocking(
+        {"sudo", "-n", "/usr/bin/systemctl", "--no-block", "start", unit});
+  });
+}
+
+bool PollUpdateAction(LibraryState& lib) {
+  if (lib.update_start_result.valid()) {
+    if (lib.update_start_result.wait_for(std::chrono::milliseconds(0)) !=
+        std::future_status::ready) return false;
+    const auto result = lib.update_start_result.get();
+    if (!result.launched || result.exit_code != 0) {
+      lib.update_waiting_for_status = false;
+      lib.update_status.phase = "ERROR";
+      lib.update_status.message = "Could not start updater; retry";
+      return true;
+    }
   }
-  status = unit == "gamebird-update.service" ? "Starting update..."
-                                               : "Checking for updates...";
-  return true;
+  if (lib.update_waiting_for_status && gb::core::NowMs() - lib.update_start_ms >= 30000) {
+    lib.update_waiting_for_status = false;
+    lib.update_status.phase = "ERROR";
+    lib.update_status.message = "No updater response; check log";
+    return true;
+  }
+  return false;
 }
 
 std::vector<std::string> BuildToolsRows(const LibraryState& lib) {
@@ -3052,6 +3166,9 @@ bool ExportDiagnostics(const Args& args,
 
   const auto summary = db.ReadSummary();
   out << "GameBird Diagnostics\n";
+  out << "running_shell_commit=" << GBSHELL_BUILD_COMMIT << "\n";
+  out << "installed_shell_commit=" << lib.update_status.installed_commit << "\n";
+  out << "latest_shell_commit=" << lib.update_status.remote_commit << "\n";
   out << "timestamp_ms=" << ts << "\n";
   out << "db_path=" << args.db_path << "\n";
   out << "systems_loaded=" << lib.systems.size() << "\n";
@@ -3149,11 +3266,8 @@ void RunToolAction(const Args& args,
       ui.screen = gb::ui::Screen::Update;
       if (!UpdateIsBusy(lib.update_status) &&
           lib.update_status.os_updates == 0 &&
-          !lib.update_status.shell_update) {
-        StartUpdaterUnit("gamebird-update-check.service", lib.status);
-        lib.update_status.phase = "CHECKING";
-        lib.update_status.message = lib.status;
-        lib.update_status.progress = 0;
+          !lib.update_status.shell_update && !lib.update_status.reboot_required) {
+        StartUpdateAction(lib, false);
       }
       break;
 
@@ -3368,6 +3482,8 @@ void HandleButton(gb::platform::Button button,
                   LibraryState& lib,
                   gb::db::Database& db,
                   const Args& args) {
+  if (lib.pending_tool_action >= 0 || lib.pending_scrape_begin) return;
+  if (ui.screen == gb::ui::Screen::Update && UpdateIsBusy(lib.update_status)) return;
   RememberBrowse(lib, ui);
   if (ui.screen == gb::ui::Screen::Nest) {
     if (!lib.nest || lib.nest->HandleButton(button)) {
@@ -3671,16 +3787,11 @@ void HandleButton(gb::platform::Button button,
           if (lib.settings.scrape_provider == "none") {
             lib.status = "select a scraper first";
           } else {
-            const auto cfg = MakeWorkerConfig(args, lib);
-            if (lib.scrape_session.Begin(db, cfg, lib.scrape_progress)) {
-              lib.scrape_active = !lib.scrape_progress.finished;
-              lib.status = lib.scrape_progress.finished
-                               ? "All present games already have art"
-                               : "Preparing scrape...";
-              ui.screen = gb::ui::Screen::ScrapeProgress;
-            } else {
-              lib.status = "scrape setup failed: " + lib.scrape_progress.last_error;
-            }
+            lib.pending_scrape_begin = true;
+            lib.scrape_active = true;
+            lib.scrape_progress = {};
+            lib.status = "Preparing scrape...";
+            ui.screen = gb::ui::Screen::ScrapeProgress;
           }
         } else if (lib.settings_selected == 4) {
           ui.screen = gb::ui::Screen::InputSetup;
@@ -3730,6 +3841,14 @@ void HandleButton(gb::platform::Button button,
         return;
       }
       if (button == gb::platform::Button::A) {
+        if (lib.tools_selected >= 0 && lib.tools_selected <= 4) {
+          static const char* messages[] = {"Scanning library...", "Identifying games...",
+              "Refreshing artwork...", "Running queued jobs...", "Exporting diagnostics..."};
+          lib.pending_tool_action = lib.tools_selected;
+          lib.status = messages[lib.tools_selected];
+          ui.needs_redraw = true;
+          return;
+        }
         RunToolAction(args, db, lib, ui);
         return;
       }
@@ -3745,13 +3864,8 @@ void HandleButton(gb::platform::Button button,
       const bool busy = UpdateIsBusy(lib.update_status);
       if (button == gb::platform::Button::A && !busy) {
         const bool available = lib.update_status.os_updates > 0 ||
-                               lib.update_status.shell_update;
-        StartUpdaterUnit(available ? "gamebird-update.service"
-                                   : "gamebird-update-check.service",
-                         lib.status);
-        lib.update_status.phase = available ? "STARTING" : "CHECKING";
-        lib.update_status.message = lib.status;
-        lib.update_status.progress = 0;
+                               lib.update_status.shell_update || lib.update_status.reboot_required;
+        StartUpdateAction(lib, available);
         ui.needs_redraw = true;
         return;
       }
@@ -4550,7 +4664,9 @@ void DrawScreen(gb::render::Surface240& surface,
           surface, theme, Ellipsize(lib.update_status.phase, 28),
           lib.update_status.progress, lib.update_status.os_updates,
           lib.update_status.shell_update, UpdateIsBusy(lib.update_status),
-          Ellipsize(lib.update_status.message, 30));
+          lib.update_status.message, GBSHELL_BUILD_COMMIT,
+          lib.update_status.installed_commit, lib.update_status.remote_commit,
+          frame_start_ms, lib.update_status.reboot_required);
       break;
     }
     case gb::ui::Screen::LaunchOptions: {
@@ -5011,7 +5127,9 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
   while (state.running) {
     gb::platform::InputFrame frame;
 
-    const int wait_ms = state.needs_redraw ? 0 : (lib.nest && lib.nest->Busy() ? 33 : 250);
+    const bool update_busy = state.screen == gb::ui::Screen::Update && UpdateIsBusy(lib.update_status);
+    const int wait_ms = state.needs_redraw ? 0 :
+        (update_busy ? 100 : (lib.nest && lib.nest->Busy() ? 33 : 250));
     const bool has_input = poll_input(frame, wait_ms);
 
     if (frame.devices_changed) {
@@ -5154,6 +5272,43 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
         HandleButton(shell_button, state, lib, db, args);
       }
     }
+
+    // Always present feedback before external commands, database jobs or network
+    // setup. Do this before even the routine background refreshes below.
+    if (lib.update_action_pending || lib.pending_tool_action >= 0 ||
+        lib.pending_scrape_begin || lib.pending_wifi_action != PendingWifiAction::None ||
+        lib.pending_bluetooth_action != PendingBluetoothAction::None ||
+        lib.pending_launch_game_id != 0 || lib.pending_launch_retroarch_menu) {
+      surface.ClearDirtyRects();
+      DrawScreen(surface, state, theme, gb::core::NowMs(), lib);
+      present(surface);
+      state.needs_redraw = false;
+      ++state.frame_count;
+    }
+    if (lib.update_action_pending) DispatchUpdateAction(lib);
+    if (lib.pending_tool_action >= 0) {
+      lib.tools_selected = lib.pending_tool_action;
+      lib.pending_tool_action = -1;
+      RunToolAction(args, db, lib, state);
+      continue;
+    }
+    if (lib.pending_scrape_begin) {
+      lib.pending_scrape_begin = false;
+      const auto cfg = MakeWorkerConfig(args, lib);
+      if (lib.scrape_session.Begin(db, cfg, lib.scrape_progress)) {
+        lib.scrape_active = !lib.scrape_progress.finished;
+        lib.status = lib.scrape_progress.finished
+            ? "All present games already have art" : "Scraping artwork...";
+      } else {
+        lib.scrape_active = false;
+        lib.status = "Scrape setup failed: " + lib.scrape_progress.last_error;
+      }
+      state.needs_redraw = true;
+      continue;
+    }
+    if (PollUpdateAction(lib)) state.needs_redraw = true;
+    if (state.screen == gb::ui::Screen::Update && UpdateIsBusy(lib.update_status))
+      state.needs_redraw = true;
 
     PollNest(db, lib, state, args);
 
@@ -5493,6 +5648,10 @@ int RunFbdev(const Args& args, gb::db::Database& db, LibraryState& lib) {
 
 int main(int argc, char** argv) {
   const Args args = ParseArgs(argc, argv);
+  if (args.version) {
+    std::cout << "GameBird Shell " << GBSHELL_BUILD_COMMIT << '\n';
+    return 0;
+  }
 
   gb::core::Log(gb::core::LogLevel::Info,
                 "Starting GameBird Shell presenter=" + args.presenter +

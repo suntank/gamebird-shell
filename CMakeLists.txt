@@ -9,6 +9,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(GBSHELL_BUILD_SERVICES "Build gblibd and gblaunch" ON)
 
+set(GBSHELL_BUILD_COMMIT "" CACHE STRING "Commit used for this shell build")
+if(NOT GBSHELL_BUILD_COMMIT)
+  execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE GBSHELL_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+else()
+  set(GBSHELL_SOURCE_COMMIT "${GBSHELL_BUILD_COMMIT}")
+endif()
+if(NOT GBSHELL_SOURCE_COMMIT MATCHES "^[0-9a-f]+$")
+  set(GBSHELL_SOURCE_COMMIT "unknown")
+endif()
+add_compile_definitions(GBSHELL_BUILD_COMMIT="${GBSHELL_SOURCE_COMMIT}")
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
@@ -314,10 +326,14 @@ if(BUILD_TESTING)
   add_test(NAME shell_flow_test COMMAND shell_flow_test)
 endif()
 
-if(BUILD_TESTING AND GBSHELL_BUILD_SERVICES)
+if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
-    add_test(NAME gblaunch_session_test
-      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gblaunch_session_test.py $<TARGET_FILE:gblaunch>)
+    add_test(NAME updater_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/updater_test.py ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gamebird-updater.sh)
+    if(GBSHELL_BUILD_SERVICES)
+      add_test(NAME gblaunch_session_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gblaunch_session_test.py $<TARGET_FILE:gblaunch>)
+    endif()
   endif()
 endif()

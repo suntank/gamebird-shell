@@ -54,6 +54,72 @@ int main(int argc, char** argv) {
         .filename=rom.filename().string(), .title=title, .sort_title=title, .size_bytes=3}), "game inserted");
   }
   LibraryState lib;
+  auto update_status = [](const std::string& fields) {
+    std::istringstream input(fields);
+    return ParseUpdateStatus(input, "this-boot", 200);
+  };
+  const auto completed_update = update_status(
+      "phase=REBOOTING\nprogress=100\nreboot_required=1\n"
+      "boot_id=previous-boot\nchecked_at=300\n");
+  Expect(!UpdateIsBusy(completed_update) && !completed_update.reboot_required &&
+      completed_update.phase == "READY", "previous boot completion unlocks update check despite clock changes");
+  const auto legacy_update = update_status(
+      "phase=REBOOTING\nprogress=100\nreboot_required=1\nchecked_at=100\n");
+  Expect(!UpdateIsBusy(legacy_update) && legacy_update.progress == 0,
+      "old updater completion recovers using boot timestamp");
+  const auto interrupted_update = update_status(
+      "phase=BUILDING GAMEBIRD\nshell_update=1\nboot_id=previous-boot\n");
+  Expect(!UpdateIsBusy(interrupted_update) && !interrupted_update.shell_update,
+      "interrupted previous boot can check again");
+  const auto active_update = update_status(
+      "phase=BUILDING GAMEBIRD\nprogress=72\nboot_id=this-boot\nchecked_at=100\n");
+  Expect(UpdateIsBusy(active_update) && active_update.progress == 72,
+      "current boot install stays protected even after clock adjustment");
+  Expect(UpdateIsBusy(update_status("phase=REBOOTING\nchecked_at=300\n")),
+      "current legacy reboot stays protected");
+  const auto available_update = update_status(
+      "phase=UPDATE AVAILABLE\nshell_update=1\nboot_id=previous-boot\n");
+  Expect(available_update.shell_update && !UpdateIsBusy(available_update),
+      "completed availability check remains usable across boots");
+  const auto versioned_update = update_status(
+      "phase=VERIFYING GAMEBIRD\ninstalled_commit=abc123\nremote_commit=def456\noperation_id=new-run\n");
+  Expect(UpdateIsBusy(versioned_update) && versioned_update.installed_commit == "abc123" &&
+      versioned_update.remote_commit == "def456", "version identities and verification phase are parsed");
+  {
+    LibraryState update_lib;
+    update_lib.update_status = available_update;
+    update_lib.update_status.operation_id = "old-run";
+    StartUpdateAction(update_lib, true);
+    Expect(UpdateIsBusy(update_lib.update_status) && update_lib.update_action_pending &&
+        !update_lib.update_start_result.valid(), "install queues visible feedback without starting a service");
+    Expect(!ApplyUpdateStatus(update_lib, available_update) &&
+        update_lib.update_status.phase == "STARTING", "old status cannot replace queued feedback");
+    std::promise<gb::platform::ProcessResult> service;
+    update_lib.update_action_pending = false;
+    update_lib.update_waiting_for_status = true;
+    update_lib.update_start_ms = gb::core::NowMs();
+    update_lib.update_start_result = service.get_future();
+    Expect(!PollUpdateAction(update_lib), "slow service start is polled without blocking UI");
+    Expect(!ApplyUpdateStatus(update_lib, versioned_update), "status waits for service-start result");
+    service.set_value({.launched=true, .exited_normally=true, .exit_code=0, .error={}});
+    PollUpdateAction(update_lib);
+    auto stale = available_update;
+    stale.operation_id = "old-run";
+    Expect(!ApplyUpdateStatus(update_lib, stale), "completed service start still rejects stale availability");
+    Expect(ApplyUpdateStatus(update_lib, versioned_update) &&
+        !update_lib.update_waiting_for_status, "new updater operation takes over progress");
+
+    StartUpdateAction(update_lib, false);
+    update_lib.update_action_pending = false;
+    update_lib.update_waiting_for_status = true;
+    std::promise<gb::platform::ProcessResult> failed_service;
+    update_lib.update_start_result = failed_service.get_future();
+    failed_service.set_value({.launched=true, .exited_normally=true, .exit_code=1, .error={}});
+    Expect(PollUpdateAction(update_lib) && update_lib.update_status.phase == "ERROR",
+        "service authorization failure becomes a visible error");
+    Expect(!ApplyUpdateStatus(update_lib, versioned_update) && update_lib.update_status.phase == "ERROR",
+        "stale progress cannot erase service-start failure");
+  }
   lib.db_ready = true;
   lib.settings.show_diagnostics = false;
   LoadSystems(db, lib);
@@ -75,6 +141,50 @@ int main(int argc, char** argv) {
   SelectSystem(db, lib, static_cast<int>(snes - lib.systems.begin()));
   gb::ui::UIState ui;
   ui.show_diagnostics = false;
+  {
+    LibraryState update_lib;
+    gb::ui::UIState update_ui;
+    update_ui.show_diagnostics = false;
+    update_ui.screen = Screen::Update;
+    update_lib.update_status = versioned_update;
+    update_lib.update_status.installed_commit = "c8cf121789";
+    update_lib.update_status.remote_commit = "a123456789";
+    update_lib.update_status.message = "Verifying protected installation";
+    update_lib.update_status.progress = 96;
+    SavePreview(previews, "10-update-verifying", update_ui, update_lib);
+    update_lib.update_status = available_update;
+    HandleButton(Button::A, update_ui, update_lib, db, args);
+    Expect(update_lib.update_action_pending && update_ui.needs_redraw &&
+        UpdateIsBusy(update_lib.update_status), "A changes update screen before executing work");
+    SavePreview(previews, "11-update-starting", update_ui, update_lib);
+    HandleButton(Button::B, update_ui, update_lib, db, args);
+    Expect(update_ui.screen == Screen::Update, "repeated input cannot hide busy update screen");
+    update_lib.update_status.phase = "ERROR";
+    update_lib.update_status.message = "Shell update did not survive restart; check update log";
+    SavePreview(previews, "12-update-failed", update_ui, update_lib);
+  }
+  {
+    LibraryState tool_lib;
+    gb::ui::UIState tool_ui;
+    tool_ui.screen = Screen::Tools;
+    tool_lib.tools_selected = 4;
+    HandleButton(Button::A, tool_ui, tool_lib, db, args);
+    Expect(tool_lib.pending_tool_action == 4 && tool_lib.status == "Exporting diagnostics...",
+        "slow tools queue feedback before touching disk");
+    Args tool_args = args;
+    tool_args.diagnostics_dir = (dir / "diagnostics").string();
+    int polls = 0, presentations = 0;
+    RunUiLoop([&](gb::platform::InputFrame& input, int) {
+        if (++polls > 1) input.quit_requested = true;
+        return false;
+      }, [&](const gb::render::Surface240&) {
+        ++presentations;
+        Expect(!fs::exists(tool_args.diagnostics_dir), "busy frame is presented before diagnostic export");
+      }, [](int, std::string&) { return 0; }, [](std::string&) { return 0; },
+      nullptr, db, tool_lib, tool_args);
+    Expect(presentations > 0 && fs::exists(tool_args.diagnostics_dir),
+        "queued tool runs after feedback is presented");
+  }
   RefreshContinue(db, lib, ui);
   Expect(ui.screen == Screen::Home && !ui.continue_available, "first boot shows useful empty Home");
   ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Browse);

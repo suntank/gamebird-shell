@@ -20,6 +20,7 @@ install_payload() {
     install -D -m 0644 "$project_dir/packaging/systemd/$name" \
       "$root/etc/systemd/system/$name"
   done
+  systemctl --root="${root:-/}" enable gamebird-update-check.timer
 }
 
 install_payload ""
@@ -36,12 +37,8 @@ fi
 mkdir -p /data/gamebird-update/apt-lists/partial
 chmod 0755 /data/gamebird-update /data/gamebird-update/apt-lists \
   /data/gamebird-update/apt-lists/partial
-if [ ! -f /data/gamebird-update/installed-shell-commit ] && \
-   command -v git >/dev/null 2>&1 && git -C "$project_dir" rev-parse HEAD >/dev/null 2>&1; then
-  git -C "$project_dir" rev-parse HEAD \
-    >/data/gamebird-update/installed-shell-commit
-  chmod 0644 /data/gamebird-update/installed-shell-commit
-fi
+# Do not mark the checkout's HEAD as installed: the running/protected binaries
+# may be older. Only a verified payload installation may write that receipt.
 
 systemctl daemon-reload
 systemctl enable --now gamebird-update-check.timer

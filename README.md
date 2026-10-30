@@ -417,6 +417,39 @@ the console reboots after a successful install. Package lists, progress state,
 and logs are kept under `/data/gamebird-update`; they are outside the anonymous
 ROM/config Samba share. Keep power connected throughout an installation.
 
+The checker timer is enabled on both the live and protected roots so it remains
+active after reboot. Progress records include the boot ID; the screen discards
+busy states from a previous boot instead of remaining stuck on `REBOOTING`.
+To repair an older console showing that stale status, run the installer above
+and then `sudo systemctl start gamebird-update-check.service` to refresh it.
+
+The update screen shows **Running** (the commit embedded in the open shell),
+**Installed** (the verified binaries on disk), and **Latest** (the commit offered
+by the update channel). `./build/gbshell --version` prints the full running build
+commit without opening the UI. Builds made outside Git can supply
+`-DGBSHELL_BUILD_COMMIT=<full-commit>` to CMake; otherwise their version is unknown.
+Diagnostics exports include these same version identifiers.
+
+Pressing A immediately shows a working screen before starting a check or
+installation. Service startup runs in the background, and a moving indicator
+remains visible during long downloads and builds. Library tools, scrape setup,
+Wi-Fi, Bluetooth, and launch actions also present their pending state before
+running commands or jobs.
+
+An installation must finish without errors and verify the protected-root
+binaries before requesting a reboot. It records the expected commit, then
+checks the installed payload after restart, even when offline. A lost or altered
+payload reports **Shell update did not survive restart** instead of silently
+offering the same update again. A failed reboot offers **A:Restart** without
+rebuilding. Timestamped stages and command output remain in
+`/data/gamebird-update/update.log`.
+
+Older consoles need the repaired updater installed once from an updated copy
+of this repository using `sudo ./scripts/install-updater.sh`. That installs the
+updater into both roots; it does not build the shell or mark the checkout's
+commit as installed. Then check/install through the update screen. An older
+unverified shell may show **Installed: Unknown** until its first verified update.
+
 The GitHub repository must be anonymously readable for retail consoles to
 discover and download shell builds. Do not ship a reusable private-repository
 token in an image: a purchaser can recover it. A private project should instead

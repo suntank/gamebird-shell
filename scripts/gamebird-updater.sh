@@ -7,10 +7,16 @@ status_file="$state_dir/status"
 log_file="$state_dir/update.log"
 apt_lists="$state_dir/apt-lists"
 installed_version="$state_dir/installed-shell-commit"
+pending_install="$state_dir/pending-shell-install"
+shell_dir=/home/gamebird/gamebird-shell
 work_dir="$state_dir/work"
 lower_root=/media/root-ro
 repo_slug=suntank/gamebird-shell
 api_url="https://api.github.com/repos/$repo_slug/commits/main"
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+operation_id="$boot_id-$$-$(date +%s%N)"
+installed_commit=""
+last_remote_commit=""
 
 mkdir -p "$state_dir" "$apt_lists/partial"
 chmod 0755 "$state_dir" "$apt_lists" "$apt_lists/partial"
@@ -21,9 +27,21 @@ clean_value() {
   printf '%s' "$1" | tr '\n=' '  ' | cut -c1-120
 }
 
+# A source checkout or a marker on /data does not identify the installed
+# binaries. Accept a commit only when all four payload hashes still match.
+payload_commit() {
+  local build=$1 commit
+  [[ -f "$build/shell-commit" && -f "$build/shell-payload.sha256" ]] || return 1
+  commit=$(cat "$build/shell-commit")
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+  (cd "$build" && sha256sum --check --status shell-payload.sha256) || return 1
+  printf '%s' "$commit"
+}
+
 write_status() {
   local phase=$1 progress=$2 os_updates=$3 shell_update=$4 reboot=$5 message=$6
-  local remote_commit=${7:-}
+  local remote_commit=${7:-$last_remote_commit}
+  last_remote_commit=$remote_commit
   local temporary="$status_file.tmp.$$"
   umask 022
   {
@@ -35,9 +53,13 @@ write_status() {
     printf 'message=%s\n' "$(clean_value "$message")"
     printf 'remote_commit=%s\n' "$(clean_value "$remote_commit")"
     printf 'checked_at=%s\n' "$(date +%s)"
+    printf 'boot_id=%s\n' "$boot_id"
+    printf 'operation_id=%s\n' "$operation_id"
+    printf 'installed_commit=%s\n' "$installed_commit"
   } >"$temporary"
   chmod 0644 "$temporary"
   mv -f "$temporary" "$status_file"
+  printf '%s %s: %s\n' "$(date -u +%FT%TZ)" "$phase" "$message" >>"$log_file"
 }
 
 field() {
@@ -51,6 +73,24 @@ apt_options=(
 )
 
 check_updates() {
+  # Verify locally before network work, including when the console is offline.
+  local expected="" install_boot=""
+  if [[ -f "$pending_install" ]]; then
+    expected=$(sed -n 's/^commit=//p' "$pending_install")
+    install_boot=$(sed -n 's/^boot_id=//p' "$pending_install")
+    if [[ "$install_boot" != "$boot_id" ]]; then
+      if [[ "$expected" != "$installed_commit" || -z "$installed_commit" ]]; then
+        write_status "ERROR" 0 0 1 0 \
+          "Shell update did not survive restart; check update log" "$expected"
+        return 0
+      fi
+      rm -f "$pending_install"
+    else
+      write_status "RESTART REQUIRED" 100 0 0 1 "Installed; press A to restart" "$expected"
+      return 0
+    fi
+  fi
+
   write_status "CHECKING" 5 0 0 0 "Refreshing Raspberry Pi packages"
   if ! apt-get "${apt_options[@]}" update >>"$log_file" 2>&1; then
     write_status "ERROR" 0 0 0 0 "Could not reach Raspberry Pi update servers"
@@ -66,12 +106,16 @@ check_updates() {
   os_count=$(grep -c '^Inst ' <<<"$simulation" || true)
 
   write_status "CHECKING" 75 "$os_count" 0 0 "Checking GameBird Shell"
-  local remote="" shell_update=0 shell_channel_ok=1 installed=""
-  remote=$(curl -fsSL --connect-timeout 10 --max-time 25 \
-      -H 'Accept: application/vnd.github+json' "$api_url" 2>>"$log_file" |
-      sed -n 's/.*"sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1) ||
+  local remote="" response="" shell_update=0 shell_channel_ok=1 installed=""
+  response=$(curl -fsSL --connect-timeout 10 --max-time 25 \
+      -H 'Accept: application/vnd.github+json' "$api_url" 2>>"$log_file") ||
       shell_channel_ok=0
-  installed=$(cat "$installed_version" 2>/dev/null || true)
+  remote=$(sed -n '/"sha":[[:space:]]*"[0-9a-f]\{40\}"/ {
+      s/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p
+      q
+    }' <<<"$response")
+  [[ "$remote" =~ ^[0-9a-f]{40}$ ]] || shell_channel_ok=0
+  installed=$installed_commit
   if [[ -n "$remote" && "$remote" != "$installed" ]]; then
     shell_update=1
   fi
@@ -84,7 +128,7 @@ check_updates() {
     write_status "UPDATE AVAILABLE" 100 "$os_count" "$shell_update" 1 \
       "$message" "$remote"
   elif (( shell_channel_ok == 0 )); then
-    write_status "CURRENT" 100 0 0 0 \
+    write_status "ERROR" 0 0 0 0 \
       "Pi OS current; GameBird channel unavailable" ""
   else
     write_status "CURRENT" 100 0 0 0 "GameBird is up to date" "$remote"
@@ -100,7 +144,7 @@ restore_policy() {
 }
 
 install_shell_payload() {
-  local source_dir=$1 remote_commit=$2 target=/home/gamebird/gamebird-shell
+  local source_dir=$1 remote_commit=$2 target=$shell_dir
   local build_dir="$work_dir/build"
 
   write_status "BUILDING GAMEBIRD" 72 0 1 1 "Configuring GameBird Shell" \
@@ -112,9 +156,10 @@ install_shell_payload() {
     >>"$log_file" 2>&1
   rm -rf "$build_dir"
   cmake -S "$source_dir" -B "$build_dir" -DBUILD_TESTING=OFF \
-    -DGBSHELL_BUILD_SERVICES=ON >>"$log_file" 2>&1
+    -DGBSHELL_BUILD_SERVICES=ON -DGBSHELL_BUILD_COMMIT="$remote_commit" >>"$log_file" 2>&1
   cmake --build "$build_dir" --target gbshell gblibd gblaunch gbhud -j1 \
     >>"$log_file" 2>&1
+  [[ "$("$build_dir/gbshell" --version)" == "GameBird Shell $remote_commit" ]]
 
   write_status "INSTALLING GAMEBIRD" 88 0 1 1 "Installing verified build" \
     "$remote_commit"
@@ -133,6 +178,9 @@ install_shell_payload() {
   install -m 0755 "$build_dir/gblibd" "$target/build/gblibd"
   install -m 0755 "$build_dir/gblaunch" "$target/build/gblaunch"
   install -m 0755 "$build_dir/gbhud" "$target/build/gbhud"
+  for binary in gbshell gblibd gblaunch gbhud; do
+    cmp "$build_dir/$binary" "$target/build/$binary"
+  done
   chown -R gamebird:gamebird "$target" /data/gamebird-shell/config
 
   install -D -m 0755 "$source_dir/scripts/gamebird-updater.sh" \
@@ -144,10 +192,8 @@ install_shell_payload() {
   for unit in "$source_dir"/packaging/systemd/*.service \
               "$source_dir"/packaging/systemd/*.timer; do
     [[ -f "$unit" ]] || continue
-    install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
+    install -D -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
   done
-  printf '%s\n' "$remote_commit" >"$installed_version"
-  chmod 0644 "$installed_version"
 }
 
 inner_install() {
@@ -178,6 +224,18 @@ inner_install() {
   if (( shell_update == 1 )); then
     install_shell_payload "$source_dir" "$remote_commit"
   fi
+  # Enable on the protected root, so the checker survives the next reboot.
+  # Enabling only in the live OverlayFS loses the symlink at shutdown.
+  systemctl --root=/ enable gamebird-update-check.timer >>"$log_file" 2>&1
+  if (( shell_update == 1 )); then
+    printf '%s\n' "$remote_commit" >"$shell_dir/build/shell-commit.tmp"
+    mv -f "$shell_dir/build/shell-commit.tmp" "$shell_dir/build/shell-commit"
+    # Bind the identity to the same receipt as the binaries. A power loss
+    # between these renames invalidates the old receipt instead of mislabelling
+    # new binaries with the previous commit.
+    (cd "$shell_dir/build" && sha256sum shell-commit gbshell gblibd gblaunch gbhud >shell-payload.sha256.tmp)
+    mv -f "$shell_dir/build/shell-payload.sha256.tmp" "$shell_dir/build/shell-payload.sha256"
+  fi
 }
 
 cleanup_mounts() {
@@ -197,6 +255,17 @@ install_updates() {
   remote_commit=$(field remote_commit)
   [[ "$os_count" =~ ^[0-9]+$ ]] || os_count=0
   [[ "$shell_update" == 1 ]] || shell_update=0
+
+  if [[ -f "$pending_install" && $(field reboot_required) == 1 &&
+        $(sed -n 's/^boot_id=//p' "$pending_install") == "$boot_id" ]]; then
+    local expected verified
+    expected=$(sed -n 's/^commit=//p' "$pending_install")
+    verified=$(payload_commit "$lower_root$shell_dir/build")
+    [[ "$expected" == "$verified" ]]
+    installed_commit=$verified
+    request_reboot "$expected"
+    return
+  fi
 
   if (( os_count == 0 && shell_update == 0 )); then
     write_status "CURRENT" 100 0 0 0 "No updates to install"
@@ -223,7 +292,7 @@ install_updates() {
       write_status "ERROR" 0 "$os_count" 0 0 "Downloaded GameBird update is incomplete"
       return 1
     }
-    source_dir=/data/gamebird-update/work/source
+    source_dir="$work_dir/source"
   fi
 
   write_status "PREPARING" 15 "$os_count" "$shell_update" 1 \
@@ -236,15 +305,35 @@ install_updates() {
   mount --make-rslave "$lower_root/dev"
   mount --bind /data "$lower_root/data"
 
-  /usr/sbin/overlayroot-chroot /usr/local/lib/gamebird/gamebird-updater \
+  # Use the downloaded updater for its own installation, including repairs to
+  # old failure handling. Do not delegate back to a stale protected-root copy.
+  local inner_updater=/usr/local/lib/gamebird/gamebird-updater
+  if (( shell_update == 1 )); then
+    inner_updater="$source_dir/scripts/gamebird-updater.sh"
+  fi
+  /usr/sbin/overlayroot-chroot /bin/bash "$inner_updater" \
     inner "$os_count" "$shell_update" "$remote_commit" "$source_dir"
+  if (( shell_update == 1 )); then
+    write_status "VERIFYING GAMEBIRD" 96 0 1 1 "Verifying protected installation" "$remote_commit"
+    local verified
+    verified=$(payload_commit "$lower_root$shell_dir/build")
+    [[ "$verified" == "$remote_commit" ]]
+    printf 'commit=%s\nboot_id=%s\n' "$remote_commit" "$boot_id" >"$pending_install.tmp"
+    mv -f "$pending_install.tmp" "$pending_install"
+    printf '%s\n' "$verified" >"$installed_version.tmp"
+    mv -f "$installed_version.tmp" "$installed_version"
+    installed_commit=$verified
+  fi
   cleanup_mounts
   trap - EXIT
   systemctl daemon-reload
-  systemctl enable gamebird-update-check.timer >/dev/null 2>&1 || true
+  systemctl enable gamebird-update-check.timer >>"$log_file" 2>&1
 
-  write_status "REBOOTING" 100 0 0 1 "Update complete; restarting GameBird" \
-    "$remote_commit"
+  request_reboot "$remote_commit"
+}
+
+request_reboot() {
+  write_status "REBOOTING" 100 0 0 1 "Update complete; restarting GameBird" "$1"
   sync
   sleep 5
   systemctl reboot
@@ -266,7 +355,11 @@ main() {
   fi
 
   exec 9>/run/lock/gamebird-updater.lock
-  flock -n 9 || exit 0
+  flock -w 30 9 || {
+    echo "Another updater still holds the lock" >>"$log_file"
+    exit 75
+  }
+  installed_commit=$(payload_commit "$shell_dir/build" || true)
 
   case "${1:-}" in
     check) check_updates ;;
@@ -275,11 +368,16 @@ main() {
   esac
 }
 
-set +e
-main "$@"
-rc=$?
-set -e
-if (( rc != 0 )); then
-  write_status "ERROR" 0 0 0 0 "Update stopped safely; restart and try again"
+report_failure() {
+  local rc=$?
+  trap - ERR
+  if [[ $(field phase) != ERROR || $(field operation_id) != "$operation_id" ]]; then
+    write_status "ERROR" 0 0 0 0 "Update failed (exit $rc); check update log"
+  fi
   exit "$rc"
-fi
+}
+
+# Keep errexit enabled inside every install function and the protected-root
+# subprocess. Otherwise failed builds/mounts can continue through to REBOOTING.
+trap report_failure ERR
+main "$@"
