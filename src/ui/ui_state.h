@@ -9,6 +9,7 @@ namespace gb::ui {
 
 enum class Screen {
   Home,
+  Nest,
   Systems,
   GameList,
   GameMenu,
@@ -24,6 +25,10 @@ enum class Screen {
   Update,
   LaunchOptions,
 };
+
+enum class HomeItem { Nest, Continue, Browse, Recent, Favorites, Tools, Settings, Count };
+constexpr int HomeIndex(HomeItem item) { return static_cast<int>(item); }
+constexpr int kHomeItemCount = HomeIndex(HomeItem::Count);
 
 struct UIState {
   Screen screen = Screen::Home;

@@ -1,9 +1,11 @@
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
 #include <png.h>
+#include <jpeglib.h>
 #include <unistd.h>
 
 #include "render/image_cache.h"
@@ -46,6 +48,29 @@ bool WritePng(const std::filesystem::path& path) {
   return true;
 }
 
+bool WriteJpeg(const std::filesystem::path& path, int width, int height) {
+  std::FILE* file = std::fopen(path.c_str(), "wb");
+  if (!file) return false;
+  jpeg_compress_struct jpeg{};
+  jpeg_error_mgr error{};
+  jpeg.err = jpeg_std_error(&error);
+  jpeg_create_compress(&jpeg);
+  jpeg_stdio_dest(&jpeg, file);
+  jpeg.image_width = width; jpeg.image_height = height;
+  jpeg.input_components = 3; jpeg.in_color_space = JCS_RGB;
+  jpeg_set_defaults(&jpeg);
+  jpeg_set_quality(&jpeg, 100, TRUE);
+  jpeg_start_compress(&jpeg, TRUE);
+  std::vector<JSAMPLE> pixels(static_cast<std::size_t>(width) * 3);
+  for (int x = 0; x < width; ++x) { pixels[x * 3] = 240; pixels[x * 3 + 1] = 48; pixels[x * 3 + 2] = 32; }
+  JSAMPROW row = pixels.data();
+  while (jpeg.next_scanline < jpeg.image_height) jpeg_write_scanlines(&jpeg, &row, 1);
+  jpeg_finish_compress(&jpeg);
+  jpeg_destroy_compress(&jpeg);
+  std::fclose(file);
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -75,6 +100,38 @@ int main() {
     Expect(surface.Pixels()[15 * 240 + 10] == gb::render::Rgb565(255, 0, 0),
            "cover is aspect-fitted and centered in the destination box");
   }
+
+  // The store cache names every image .png, so signature detection is required.
+  const auto jpeg_path = temp / "jpeg-named-as-png.png";
+  Expect(WriteJpeg(jpeg_path, 3, 2), "write JPEG fixture");
+  image = cache.LoadImage(jpeg_path.string(), error);
+  Expect(image && error.empty() && image->width == 3 && image->height == 2,
+         "JPEG signature is decoded despite PNG filename");
+  if (image) {
+    const auto pixel = image->pixels.front();
+    Expect(((pixel >> 11) & 31) >= 28 && ((pixel >> 5) & 63) <= 14 && (pixel & 31) <= 5,
+           "JPEG pixels convert to RGB565 with expected color");
+  }
+  Expect(cache.LoadPng(jpeg_path.string(), error) != nullptr,
+         "existing LoadPng callers gain JPEG compatibility");
+  const auto large_jpeg = temp / "large.jpg";
+  Expect(WriteJpeg(large_jpeg, 800, 400), "write larger JPEG fixture");
+  image = cache.LoadImage(large_jpeg.string(), error);
+  Expect(image && image->width == 240 && image->height == 120 && image->pixels.size() == 240 * 120,
+         "JPEG decode stores a bounded aspect-preserving cache image");
+  const auto malformed = temp / "broken.jpg";
+  const unsigned char malformed_bytes[] = {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x03, 0x00};
+  std::ofstream(malformed, std::ios::binary).write(reinterpret_cast<const char*>(malformed_bytes), sizeof(malformed_bytes));
+  Expect(cache.LoadImage(malformed.string(), error) == nullptr && !error.empty(),
+         "malformed JPEG returns an error without terminating the process");
+  const auto oversized = temp / "oversized.jpg";
+  Expect(WriteJpeg(oversized, 4097, 1), "write oversized JPEG fixture");
+  Expect(cache.LoadImage(oversized.string(), error) == nullptr && error.find("limits") != std::string::npos,
+         "JPEG dimensions enforce the same bounds as PNG");
+  const auto unsupported = temp / "unknown.png";
+  std::ofstream(unsupported) << "not an image";
+  Expect(cache.LoadImage(unsupported.string(), error) == nullptr && !error.empty(),
+         "unsupported artwork has a graceful fallback");
 
   std::error_code ec;
   std::filesystem::remove_all(temp, ec);

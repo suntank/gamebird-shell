@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,6 +24,7 @@
 #include "core/retroarch_input.h"
 #include "core/time.h"
 #include "db/db.h"
+#include "db/queries.h"
 #include "platform/input_evdev.h"
 #include "platform/battery_ina219.h"
 #include "platform/platform.h"
@@ -33,6 +36,7 @@
 #include "scrape/jobs.h"
 #include "ui/screens/home.h"
 #include "ui/screens/update.h"
+#include "ui/screens/nest.h"
 #include "ui/ui_state.h"
 #include "ui/widgets/list.h"
 #include "ui/widgets/text.h"
@@ -51,6 +55,7 @@ struct Args {
   std::string settings_path = "./config/user_settings.json";
   std::string diagnostics_dir = "./data";
   std::string artwork_dir;
+  std::string nest_config;
   std::string battery_i2c = "/dev/i2c-1";
   std::uint8_t battery_address = 0x43;
   bool battery_disabled = false;
@@ -333,6 +338,8 @@ struct UpdateStatus {
 struct LibraryState {
   bool db_ready = false;
   std::string status;
+  std::unique_ptr<gb::ui::screens::NestController> nest;
+  gb::nest::Config nest_config;
 
   gb::core::RuntimeSettings settings;
   gb::core::BrowseState browse;
@@ -515,6 +522,10 @@ Args ParseArgs(const int argc, char** argv) {
     }
     if (arg == "--artwork-dir" && i + 1 < argc) {
       out.artwork_dir = argv[++i];
+      continue;
+    }
+    if (arg == "--nest-config" && i + 1 < argc) {
+      out.nest_config = argv[++i];
       continue;
     }
     if (arg == "--battery-i2c" && i + 1 < argc) {
@@ -3190,12 +3201,175 @@ void RunToolAction(const Args& args,
   ui.needs_redraw = true;
 }
 
+gb::nest::Config NestConfig(const Args& args) {
+  namespace fs = std::filesystem;
+  auto data = fs::path(args.db_path).parent_path();
+  if (data.empty()) data = ".";
+  std::vector<std::string> roots;
+  std::string error;
+  if (!gb::db::LoadLibraryRootsFromDefaults(args.defaults_json, roots, error))
+    throw std::runtime_error(error);
+  fs::path apps;
+  for (const auto& root : roots) {
+    auto path = fs::path(ExpandHomePath(root)).lexically_normal();
+    if (path.filename() == "apps") { apps = path; break; }
+  }
+  if (apps.empty()) apps = fs::path(ExpandHomePath(roots.front())) / "apps";
+  const auto config_file = args.nest_config.empty()
+      ? fs::path(args.settings_path).parent_path() / "nest.json"
+      : fs::path(args.nest_config);
+  auto config = gb::nest::LoadConfig(config_file, data / "nest", data / "nest" / "games", apps);
+  std::vector<gb::db::SystemDefinition> systems;
+  if (!gb::db::LoadSystemsFromDirectory(args.systems_dir, systems, error))
+    throw std::runtime_error(error);
+  const auto find_system = [&](const std::string& id) {
+    return std::find_if(systems.begin(), systems.end(), [&](const auto& system) { return system.id == id; });
+  };
+  const auto app_system = find_system("apps");
+  if (app_system == systems.end() || app_system->launch_type != "exec" ||
+      std::find(app_system->rom_extensions.begin(), app_system->rom_extensions.end(), ".sh") == app_system->rom_extensions.end())
+    throw std::runtime_error("Nest needs an apps system that launches .sh games");
+  const auto contains = [](const fs::path& root, const fs::path& path) {
+    const auto base = fs::weakly_canonical(fs::absolute(root));
+    const auto target = fs::weakly_canonical(fs::absolute(path));
+    auto a = base.begin(), b = target.begin();
+    for (; a != base.end(); ++a, ++b)
+      if (b == target.end() || *a != *b) return false;
+    return true;
+  };
+  bool scanned_launchers = false;
+  for (const auto& root : roots) {
+    const auto expanded = ExpandHomePath(root);
+    if (contains(expanded, config.launchers_dir)) {
+      // Match the scanner's folder precedence: a psx/snes folder must not
+      // accidentally turn the generated .sh launcher into an ignored sidecar.
+      const auto relative = fs::weakly_canonical(config.launchers_dir).lexically_relative(fs::weakly_canonical(expanded));
+      auto classified = relative.empty() ? systems.end() : find_system(relative.begin()->string());
+      if (classified == systems.end()) classified = find_system(fs::path(expanded).filename().string());
+      if (classified == systems.end() || classified->id == "apps") scanned_launchers = true;
+    }
+    if (contains(expanded, config.games_dir) || contains(config.games_dir, expanded))
+      throw std::runtime_error("Nest game payloads must be separate from library roots");
+  }
+  if (!scanned_launchers)
+    throw std::runtime_error("Nest launchers must be inside a library root");
+  return config;
+}
+
+void OpenNest(gb::ui::UIState& ui, LibraryState& lib, const Args& args) {
+  try {
+    if (!lib.nest) {
+      lib.nest_config = NestConfig(args);
+      lib.nest = std::make_unique<gb::ui::screens::NestController>(lib.nest_config);
+    }
+    lib.nest->Open();
+    lib.status.clear();
+    ui.screen = gb::ui::Screen::Nest;
+  } catch (const std::exception& error) {
+    lib.status = std::string("Nest: ") + error.what();
+    gb::core::Log(gb::core::LogLevel::Warn, lib.status);
+  }
+  ui.needs_redraw = true;
+}
+
+void RefreshNestLibrary(gb::db::Database& db, LibraryState& lib, const Args& args) {
+  namespace fs = std::filesystem;
+  if (!lib.db_ready) { lib.status = "Nest: catalog unavailable"; return; }
+  gb::db::ScanConfig scan;
+  scan.defaults_json_path = args.defaults_json;
+  scan.systems_dir = args.systems_dir;
+  gb::db::ScanStats stats;
+  if (!gb::db::RunIncrementalScan(db, scan, stats)) {
+    lib.status = "Nest library refresh failed";
+    gb::core::Log(gb::core::LogLevel::Warn, lib.status + ": " + db.LastError());
+    if (lib.nest) lib.nest->ReportStatus(lib.status, true);
+  }
+  if (lib.nest) {
+    std::vector<gb::db::LaunchInfo> games;
+    db.ListPresentLaunchInfos(games);
+    for (const auto& [slug, installed] : lib.nest->Installed()) {
+      const auto game = std::find_if(games.begin(), games.end(), [&](const auto& item) {
+        return fs::weakly_canonical(item.rom_path) == fs::weakly_canonical(installed.launcher_path);
+      });
+      if (game == games.end()) continue;
+      const auto icon = fs::path(installed.launcher_path).replace_extension(".png");
+      std::error_code ec;
+      if (fs::is_regular_file(icon, ec)) db.UpsertGameBoxArt(game->game_id, icon.string());
+      const auto entry = std::find_if(lib.nest->Catalog().begin(), lib.nest->Catalog().end(),
+          [&](const auto& item) { return item.slug == slug || item.id == slug; });
+      if (entry != lib.nest->Catalog().end()) {
+        gb::db::MetadataUpdate metadata;
+        metadata.game_id = game->game_id;
+        metadata.description = entry->description;
+        metadata.source = "gamebird-nest";
+        metadata.source_id = slug;
+        if (!entry->tags.empty()) metadata.genre = entry->tags.front();
+        db.UpsertGameMetadata(metadata);
+      }
+    }
+  }
+  LoadSystems(db, lib);
+  ReloadGameList(db, lib);
+}
+
+void PollNest(gb::db::Database& db, LibraryState& lib, gb::ui::UIState& state, const Args& args) {
+  if (lib.nest) {
+    if (lib.nest->Tick()) state.needs_redraw = true;
+    if (lib.nest->TakeLibraryChanged()) {
+      RefreshNestLibrary(db, lib, args);
+      RefreshContinue(db, lib, state);
+      state.needs_redraw = true;
+    }
+    const auto launch_path = lib.nest->TakeLaunchPath();
+    if (!launch_path.empty()) {
+      std::vector<gb::db::LaunchInfo> games;
+      db.ListPresentLaunchInfos(games);
+        const auto find_game = [&]() {
+          return std::find_if(games.begin(), games.end(), [&](const auto& item) {
+            return std::filesystem::weakly_canonical(item.rom_path) ==
+                std::filesystem::weakly_canonical(launch_path);
+          });
+        };
+        auto game = find_game();
+        if (game == games.end()) {
+          // A legacy launcher can become playable before the startup worker's
+          // queued artwork/metadata work finishes. Make it visible immediately.
+          RefreshNestLibrary(db, lib, args);
+          db.ListPresentLaunchInfos(games);
+          game = find_game();
+        }
+      if (game != games.end()) {
+        // Use the same launch validation and input/display lifecycle as every
+        // other shell game. Returning from gameplay returns to Nest.
+        lib.game_menu_return = gb::ui::Screen::Nest;
+        lib.menu_game.id = game->game_id;
+        lib.pending_play_mode = gb::core::PlayMode::Fresh;
+        lib.pending_launch_game_id = game->game_id;
+          lib.status.clear();
+        } else {
+          lib.status = "Nest game not found in library";
+          lib.nest->ReportStatus(lib.status, true);
+        }
+      state.needs_redraw = true;
+    }
+  }
+}
+
 void HandleButton(gb::platform::Button button,
                   gb::ui::UIState& ui,
                   LibraryState& lib,
                   gb::db::Database& db,
                   const Args& args) {
   RememberBrowse(lib, ui);
+  if (ui.screen == gb::ui::Screen::Nest) {
+    if (!lib.nest || lib.nest->HandleButton(button)) {
+      ui.screen = gb::ui::Screen::Home;
+      ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Nest);
+      RefreshContinue(db, lib, ui);
+    }
+    ui.needs_redraw = true;
+    return;
+  }
   if (ui.screen == gb::ui::Screen::Bluetooth &&
       lib.bluetooth_modal != BluetoothModalType::None) {
     if (button == gb::platform::Button::A) {
@@ -3279,28 +3453,36 @@ void HandleButton(gb::platform::Button button,
   switch (ui.screen) {
     case gb::ui::Screen::Home:
       if (button == gb::platform::Button::Up || button == gb::platform::Button::Down) {
-        ui.home_selected = (ui.home_selected + (button == gb::platform::Button::Up ? 5 : 1)) % 6;
+        ui.home_selected = (ui.home_selected + (button == gb::platform::Button::Up ?
+            gb::ui::kHomeItemCount - 1 : 1)) % gb::ui::kHomeItemCount;
       } else if (button == gb::platform::Button::A) {
-        if (ui.home_selected == 0) {
+        using gb::ui::HomeItem;
+        using gb::ui::HomeIndex;
+        if (ui.home_selected == HomeIndex(HomeItem::Nest)) {
+          OpenNest(ui, lib, args);
+        } else if (ui.home_selected == HomeIndex(HomeItem::Continue)) {
           RefreshContinue(db, lib, ui);
           if (lib.continue_game_id) OpenGameMenu(db, ui, lib, args, lib.continue_game_id);
           else lib.status = "Play a game to see it here";
-        } else if (ui.home_selected == 1) {
+        } else if (ui.home_selected == HomeIndex(HomeItem::Browse)) {
           ui.screen = lib.browse.screen == "games" ? gb::ui::Screen::GameList : gb::ui::Screen::Systems;
           if (ui.screen == gb::ui::Screen::GameList) ReloadGameList(db, lib);
-        } else if (ui.home_selected == 2 || ui.home_selected == 3) {
-          lib.game_list_view = ui.home_selected == 2 ? GameListView::Recent : GameListView::Favorites;
+        } else if (ui.home_selected == HomeIndex(HomeItem::Recent) || ui.home_selected == HomeIndex(HomeItem::Favorites)) {
+          lib.game_list_view = ui.home_selected == HomeIndex(HomeItem::Recent) ? GameListView::Recent : GameListView::Favorites;
           lib.game_selected = 0;
-          if (ui.home_selected == 2) LoadRecentGames(db, lib); else LoadFavoriteGames(db, lib);
+          if (ui.home_selected == HomeIndex(HomeItem::Recent)) LoadRecentGames(db, lib); else LoadFavoriteGames(db, lib);
           lib.status.clear();
           ui.screen = gb::ui::Screen::GameList;
-        } else if (ui.home_selected == 4) {
+        } else if (ui.home_selected == HomeIndex(HomeItem::Tools)) {
           lib.tools_exit_confirm = false;
           ui.screen = gb::ui::Screen::Tools;
-        } else if (ui.home_selected == 5) ui.screen = gb::ui::Screen::Settings;
+        } else if (ui.home_selected == HomeIndex(HomeItem::Settings)) ui.screen = gb::ui::Screen::Settings;
       } else if (button == gb::platform::Button::B) ui.screen = ui.menu_return_screen;
       ui.needs_redraw = true;
       return;
+
+    case gb::ui::Screen::Nest:
+      return;  // Handled above, including Nest's contextual Start and Select.
 
     case gb::ui::Screen::SystemMenu:
       if (button == gb::platform::Button::Up || button == gb::platform::Button::Down)
@@ -4276,6 +4458,9 @@ void DrawScreen(gb::render::Surface240& surface,
       gb::ui::screens::DrawHome(surface, state, theme);
       gb::ui::widgets::DrawContentText(surface, 16, 198, lib.status, theme.text_dim);
       break;
+    case gb::ui::Screen::Nest:
+      if (lib.nest) lib.nest->Draw(surface, theme);
+      break;
     case gb::ui::Screen::GameMenu: {
       gb::ui::widgets::DrawMenuFrame(surface, theme, "GAME MENU");
       gb::ui::widgets::DrawContentText(surface, 16, 38, lib.menu_game.title, theme.accent);
@@ -4808,7 +4993,8 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
   gb::ui::UIState state;
   state.show_diagnostics = lib.settings.show_diagnostics;
   RefreshContinue(db, lib, state);
-  state.home_selected = state.continue_available ? 0 : 1;
+  state.home_selected = gb::ui::HomeIndex(state.continue_available
+      ? gb::ui::HomeItem::Continue : gb::ui::HomeItem::Nest);
   state.menu_return_screen = lib.browse.screen == "games" ? gb::ui::Screen::GameList : gb::ui::Screen::Systems;
   if (lib.tv_mode) {
     lib.tv_mode_notice_until_ms = gb::core::NowMs() + 3000;
@@ -4818,7 +5004,7 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
   while (state.running) {
     gb::platform::InputFrame frame;
 
-    const int wait_ms = state.needs_redraw ? 0 : 250;
+    const int wait_ms = state.needs_redraw ? 0 : (lib.nest && lib.nest->Busy() ? 33 : 250);
     const bool has_input = poll_input(frame, wait_ms);
 
     if (frame.devices_changed) {
@@ -4962,6 +5148,8 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
       }
     }
 
+    PollNest(db, lib, state, args);
+
     RememberBrowse(lib, state);
     if (lib.browse != lib.saved_browse) {
       if (lib.browse_changed_ms == 0) lib.browse_changed_ms = gb::core::NowMs();
@@ -5084,15 +5272,17 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
 
       const int game_id = lib.pending_launch_game_id;
       lib.pending_launch_game_id = 0;
+      const bool return_to_nest = state.screen == gb::ui::Screen::Nest;
 
       std::string browse_error;
       if (gb::core::SaveBrowseState(args.db_path, lib.browse, browse_error)) lib.saved_browse = lib.browse;
       std::string launch_status;
-      launch_game(game_id, launch_status);
+      const int launch_exit = launch_game(game_id, launch_status);
+      if (return_to_nest && lib.nest) lib.nest->ReportStatus(launch_status, launch_exit != 0);
       RefreshContinue(db, lib, state);
       RefreshGameMenu(db, lib, args);
       lib.context_selected = 0;
-      state.screen = gb::ui::Screen::GameMenu;
+      state.screen = return_to_nest ? gb::ui::Screen::Nest : gb::ui::Screen::GameMenu;
       lib.status = launch_status;
       lib.ignore_input_until_ms = gb::core::NowMs() + kPostLaunchInputBlockMs;
       ReloadGameList(db, lib);

@@ -35,11 +35,13 @@ This repository now includes Milestone 7 foundations:
   - Rebuild thumbnails (placeholder pipeline job)
   - Run queued jobs
   - Export diagnostics text report
+- Native Game Bird Nest store, integrated into the Start menu (no Python or
+  Pygame needed for Nest)
 
 ## Build (Ubuntu)
 
 ```bash
-sudo apt-get install -y build-essential cmake pkg-config libsdl2-dev libpng-dev
+sudo apt-get install -y build-essential cmake pkg-config libsdl2-dev libpng-dev libjpeg-dev libcurl4-openssl-dev libssl-dev libarchive-dev ca-certificates
 cmake -S . -B build -G "Unix Makefiles"
 cmake --build build -j
 ```
@@ -67,6 +69,41 @@ Controls:
   clears the active profile
 - Live Input Test: press each control to mark it; `Select` returns (B is tested
   as an input here)
+
+### Game Bird Nest
+
+**Game Bird Nest** is the first entry in the Start/main menu. It runs inside
+`gbshell` using the same display, theme, and controller mappings. Browse the
+catalog, view game details, install or update games, manage installed games and
+ratings, filter by tags/rating, set child-mode PIN protection, or request a
+developer linking code. B returns through Nest's screens and from its home
+returns to the shell. Opening and closing Nest does not restart the display or
+reboot the device. Network and package operations run on a background worker.
+
+Nest uses the existing Worker API and CDN. It caches catalog data for offline
+browsing and checks package size and SHA-256 before installing. Updates stage
+and verify their contents before replacing an installed game. Game payloads
+live under `nest/games` beside the catalog database; one launcher per game is
+placed in the configured `apps` library root. Installs and removals refresh the
+shell catalog immediately. Games appear in the **GAMEBIRD** system, and Play
+from Nest uses the normal shell launch lifecycle. Downloaded games may have
+their own runtime requirements, including Python; Nest itself has none.
+
+Settings are read from `nest.json` beside `--settings`, or a file selected with
+`--nest-config`. The bundled file supplies the production API/CDN URLs and
+timeout. Optional `data_dir`, `games_dir`, and `launchers_dir` override storage
+locations. Keep payloads outside scanned library roots and launchers inside a
+configured root. The default data/apps locations are already persistent on
+the protected Pi image. The updater installs the native libraries when needed.
+
+On first use, Nest imports the previous `~/gamebird/store` registry, catalog,
+ratings, and parental PIN without replacing existing native data. Existing
+game payloads remain in `~/gamebird/games`, and Nest creates shell launchers
+for them. For an image migrated from another Linux account, set
+`legacy_data_dir` and `legacy_games_dir` in `nest.json` to those original
+directories before first opening Nest. Known legacy game launcher paths are
+adapted to the configured install directory. Keep the old store and game
+directories until migration has been checked on the device.
 
 ### Continue playing
 

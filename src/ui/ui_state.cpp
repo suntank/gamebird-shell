@@ -2,12 +2,6 @@
 
 namespace gb::ui {
 
-namespace {
-
-constexpr int kHomeItemCount = 6;
-
-}  // namespace
-
 void HandleButton(UIState& state, const platform::Button button) {
   switch (button) {
     case platform::Button::Start:
@@ -42,12 +36,13 @@ void HandleButton(UIState& state, const platform::Button button) {
 
     if (button == platform::Button::A) {
       switch (state.home_selected) {
-        case 0: if (state.continue_available) state.screen = Screen::GameMenu; break;
-        case 1: state.screen = Screen::Systems; break;
-        case 2: state.screen = Screen::GameList; state.list_context = "Recent"; break;
-        case 3: state.screen = Screen::GameList; state.list_context = "Favorites"; break;
-        case 4: state.screen = Screen::Tools; break;
-        case 5: state.screen = Screen::Settings; break;
+        case HomeIndex(HomeItem::Nest): state.screen = Screen::Nest; break;
+        case HomeIndex(HomeItem::Continue): if (state.continue_available) state.screen = Screen::GameMenu; break;
+        case HomeIndex(HomeItem::Browse): state.screen = Screen::Systems; break;
+        case HomeIndex(HomeItem::Recent): state.screen = Screen::GameList; state.list_context = "Recent"; break;
+        case HomeIndex(HomeItem::Favorites): state.screen = Screen::GameList; state.list_context = "Favorites"; break;
+        case HomeIndex(HomeItem::Tools): state.screen = Screen::Tools; break;
+        case HomeIndex(HomeItem::Settings): state.screen = Screen::Settings; break;
       }
       state.needs_redraw = true;
       return;
@@ -81,6 +76,8 @@ const char* ScreenName(const Screen screen) {
   switch (screen) {
     case Screen::Home:
       return "HOME";
+    case Screen::Nest:
+      return "NEST";
     case Screen::Systems:
       return "SYSTEMS";
     case Screen::GameList:

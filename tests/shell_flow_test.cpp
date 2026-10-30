@@ -3,6 +3,7 @@
 #include "../src/main.cpp"
 #undef main
 #include <iostream>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -62,10 +63,10 @@ int main(int argc, char** argv) {
   ui.show_diagnostics = false;
   RefreshContinue(db, lib, ui);
   Expect(ui.screen == Screen::Home && !ui.continue_available, "first boot shows useful empty Home");
-  ui.home_selected = 1;
+  ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Browse);
   SavePreview(previews, "01-first-boot", ui, lib);
   auto press = [&](Button button) { HandleButton(button, ui, lib, db, args); RememberBrowse(lib, ui); };
-  ui.home_selected = 1; press(Button::A);
+  ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Browse); press(Button::A);
   Expect(ui.screen == Screen::Systems, "A opens browse");
   press(Button::Start);
   Expect(ui.screen == Screen::SystemMenu, "Start opens system menu");
@@ -112,7 +113,7 @@ int main(int argc, char** argv) {
   std::ofstream(save_dir / "current.auto") << "save";
   std::ofstream(save_dir / "previous.auto") << "previous";
   db.UpdateLastPlayed(metroid, 123456789);
-  ui.screen = Screen::Home; ui.home_selected = 0;
+  ui.screen = Screen::Home; ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Continue);
   RefreshContinue(db, lib, ui);
   Expect(ui.continue_available && ui.continue_title == "Super Metroid", "last game featured");
   SavePreview(previews, "06-continue-home", ui, lib);
@@ -134,6 +135,53 @@ int main(int argc, char** argv) {
   Expect(gb::core::SaveBrowseState(args.db_path, lib.browse, save_error), "persist positions");
   gb::core::BrowseState restored;
   Expect(gb::core::LoadBrowseState(args.db_path, restored) && restored == lib.browse, "positions survive restart");
+
+  // Opening the first Start-menu entry imports native launchers and refreshes
+  // the real catalog, while B returns to the shell without a launch or reboot.
+  const auto apps = dir / "apps";
+  const auto nest = dir / "nest";
+  fs::create_directories(apps);
+  fs::create_directories(nest / "games");
+  fs::create_directories(args.systems_dir);
+  args.defaults_json = (dir / "defaults.json").string();
+  args.nest_config = (dir / "nest-config.json").string();
+  std::ofstream(args.defaults_json) << "{\"library\":{\"roots\":[\"" << apps.string() << "\"]}}";
+  std::ofstream(args.nest_config) << "{\"api_base_url\":\"file://" << dir.string()
+      << "\",\"cdn_base_url\":\"file://" << dir.string()
+      << "\",\"legacy_data_dir\":\"" << (dir / "legacy-store").string() << "\"}";
+  std::ofstream(fs::path(args.systems_dir) / "apps.json") << R"({"id":"apps","name":"GAMEBIRD","rom_extensions":[".sh"],"launch_type":"exec","launch_template":"{rom_path}"})";
+  std::ofstream(nest / "games" / "Test Game.sh") << "#!/bin/sh\nexit 0\n";
+  std::ofstream(nest / "installed_games.json") << "{\"games\":[{\"id\":\"test-game\",\"title\":\"Test Game!\","
+      << "\"installed_version\":\"1.0.0\",\"install_path\":\"" << (nest / "games").string()
+      << "\",\"installed_files\":[\"Test Game.sh\"]}]}";
+  ui.screen = Screen::Home;
+  ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Nest);
+  SavePreview(previews, "08-nest-start-menu", ui, lib);
+  press(Button::A);
+  Expect(ui.screen == Screen::Nest && lib.nest, "top Start entry opens integrated Nest");
+  for (int i = 0; lib.nest && lib.nest->Busy() && i < 2000; ++i) {
+    lib.nest->Tick();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  Expect(lib.nest && !lib.nest->Busy(), "Nest initializes without network access");
+  if (lib.nest && lib.nest->TakeLibraryChanged()) RefreshNestLibrary(db, lib, args);
+  std::vector<gb::db::GameSummary> nest_games;
+  db.ListGamesBySystem("apps", false, nest_games);
+  Expect(nest_games.size() == 1 && nest_games.front().title == "Test Game!", "Nest launcher enters shell catalog with publisher title");
+  SavePreview(previews, "09-integrated-nest", ui, lib);
+  press(Button::Down); press(Button::A);  // Installed games.
+  for (int i = 0; lib.nest && lib.nest->Busy() && i < 2000; ++i) {
+    PollNest(db, lib, ui, args);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  press(Button::X); PollNest(db, lib, ui, args);
+  Expect(!nest_games.empty() && lib.pending_launch_game_id == nest_games.front().id &&
+      lib.pending_play_mode == gb::core::PlayMode::Fresh, "Nest Play enters normal shell launch pipeline");
+  lib.pending_launch_game_id = 0;
+  press(Button::B);  // Installed games -> Nest home.
+  press(Button::B);
+  Expect(ui.screen == Screen::Home && ui.running && lib.pending_launch_game_id == 0, "B returns from Nest to shell without launching or exiting");
+  lib.nest.reset();
   db.Close(); fs::remove_all(dir);
   return failures ? 1 : 0;
 }

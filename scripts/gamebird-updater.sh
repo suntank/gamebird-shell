@@ -105,6 +105,11 @@ install_shell_payload() {
 
   write_status "BUILDING GAMEBIRD" 72 0 1 1 "Configuring GameBird Shell" \
     "$remote_commit"
+  # Native Nest downloads and verifies packages in-process. Existing consoles
+  # need these development libraries before building their first native version.
+  apt-get "${apt_options[@]}" -y --no-install-recommends install \
+    libcurl4-openssl-dev libssl-dev libarchive-dev libjpeg-dev ca-certificates \
+    >>"$log_file" 2>&1
   rm -rf "$build_dir"
   cmake -S "$source_dir" -B "$build_dir" -DBUILD_TESTING=OFF \
     -DGBSHELL_BUILD_SERVICES=ON >>"$log_file" 2>&1
@@ -121,6 +126,7 @@ install_shell_payload() {
   rsync -a --delete "$source_dir/config/" "$target/config/"
   rsync -a \
     --exclude=user_settings.json --exclude=user_settings.local.json \
+    --exclude=nest.json \
     --exclude=retroarch-input-gamebird.cfg \
     "$source_dir/config/" /data/gamebird-shell/config/
   install -m 0755 "$build_dir/gbshell" "$target/build/gbshell"

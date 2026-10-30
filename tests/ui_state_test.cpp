@@ -8,6 +8,11 @@ int main() {
   assert(state.screen == Screen::Home);
   state.home_selected = 0;
   gb::ui::HandleButton(state, Button::A);
+  assert(state.screen == Screen::Nest);
+  gb::ui::HandleButton(state, Button::B);
+  assert(state.screen == Screen::Home);
+  state.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Continue);
+  gb::ui::HandleButton(state, Button::A);
   assert(state.screen == Screen::Home);
   state.continue_available = true;
   gb::ui::HandleButton(state, Button::A);
@@ -27,4 +32,10 @@ int main() {
   assert(state.screen == Screen::Home);
   gb::ui::HandleButton(state, Button::B);
   assert(state.screen == Screen::Settings);
+  state.screen = Screen::Home;
+  state.home_selected = 0;
+  gb::ui::HandleButton(state, Button::Up);
+  assert(state.home_selected == gb::ui::HomeIndex(gb::ui::HomeItem::Settings));
+  gb::ui::HandleButton(state, Button::Down);
+  assert(state.home_selected == 0);
 }

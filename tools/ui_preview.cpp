@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
   };
   using namespace gb::ui::screens;
   gb::ui::UIState state;
-  state.home_selected = 1;
+  state.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Nest);
   DrawHome(s, state, t); save("01-home");
   DrawSystems(s,t,{{"Super Nintendo",42,"",""},{"PlayStation",18,"",""}},0,""); save("02-systems");
   DrawGameBrowser(s,t,"Super Nintendo",{"Chrono Trigger","Super Metroid","The Legend of Zelda"},1,"",""); save("03-browser");

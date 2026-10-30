@@ -1,12 +1,15 @@
 #include "render/image_cache.h"
 
 #include <algorithm>
+#include <array>
+#include <csetjmp>
 #include <cstdio>
 #include <limits>
 #include <memory>
 #include <utility>
 
 #include <png.h>
+#include <jpeglib.h>
 
 namespace gb::render {
 
@@ -118,11 +121,116 @@ bool DecodePng(const std::string& path, CachedImage& image, std::string& error) 
   return true;
 }
 
+struct JpegError {
+  jpeg_error_mgr handler{};
+  std::jmp_buf jump;
+};
+struct JpegReader {
+  jpeg_decompress_struct decoder{};
+  JpegError error;
+  std::vector<JSAMPLE> row;
+  bool initialized = false;
+  ~JpegReader() { if (initialized) jpeg_destroy_decompress(&decoder); }
+};
+void JpegFailure(j_common_ptr decoder) {
+  auto* error = reinterpret_cast<JpegError*>(decoder->err);
+  std::longjmp(error->jump, 1);
+}
+void JpegQuiet(j_common_ptr) {}
+
+bool DecodeJpeg(const std::string& path, CachedImage& image, std::string& error) {
+  std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(std::fopen(path.c_str(), "rb"),
+                                                    &std::fclose);
+  if (!file) { error = "cannot open JPEG"; return false; }
+  // Objects modified by libjpeg live on the heap so its C error jump never
+  // skips a C++ destructor or leaves modified automatic objects indeterminate.
+  auto state = std::make_unique<JpegReader>();
+  state->decoder.err = jpeg_std_error(&state->error.handler);
+  state->error.handler.error_exit = JpegFailure;
+  state->error.handler.output_message = JpegQuiet;
+  if (setjmp(state->error.jump) != 0) {
+    image = {};
+    error = "invalid JPEG data";
+    return false;
+  }
+  state->initialized = true;
+  jpeg_create_decompress(&state->decoder);
+  jpeg_stdio_src(&state->decoder, file.get());
+  if (jpeg_read_header(&state->decoder, TRUE) != JPEG_HEADER_OK) {
+    error = "invalid JPEG header"; return false;
+  }
+  if (state->decoder.image_width == 0 || state->decoder.image_height == 0 ||
+      state->decoder.image_width > kMaxDecodedDimension ||
+      state->decoder.image_height > kMaxDecodedDimension ||
+      static_cast<std::size_t>(state->decoder.image_width) *
+          state->decoder.image_height > kMaxDecodedPixels) {
+    error = "JPEG dimensions exceed cache limits"; return false;
+  }
+  state->decoder.out_color_space = JCS_RGB;
+  state->decoder.scale_num = 1;
+  state->decoder.scale_denom = 1;
+  while (state->decoder.scale_denom < 8 &&
+         std::max(state->decoder.image_width, state->decoder.image_height) /
+             state->decoder.scale_denom > kCacheDimension * 2)
+    state->decoder.scale_denom *= 2;
+  if (!jpeg_start_decompress(&state->decoder) || state->decoder.output_components != 3) {
+    error = "unsupported JPEG color format"; return false;
+  }
+  const auto width = state->decoder.output_width;
+  const auto height = state->decoder.output_height;
+  const double scale = std::max(1.0, std::max(static_cast<double>(width) / kCacheDimension,
+                                            static_cast<double>(height) / kCacheDimension));
+  image.width = std::max(1, static_cast<int>(width / scale));
+  image.height = std::max(1, static_cast<int>(height / scale));
+  image.pixels.resize(static_cast<std::size_t>(image.width) * image.height);
+  state->row.resize(static_cast<std::size_t>(width) * 3);
+  int destination_y = 0;
+  while (state->decoder.output_scanline < height) {
+    const auto source_y = state->decoder.output_scanline;
+    JSAMPROW row = state->row.data();
+    if (jpeg_read_scanlines(&state->decoder, &row, 1) != 1) {
+      image = {}; error = "incomplete JPEG data"; return false;
+    }
+    while (destination_y < image.height &&
+           static_cast<JDIMENSION>(destination_y * scale) == source_y) {
+      for (int x = 0; x < image.width; ++x) {
+        const auto source_x = std::min(width - 1, static_cast<JDIMENSION>(x * scale));
+        const auto* pixel = state->row.data() + static_cast<std::size_t>(source_x) * 3;
+        image.pixels[static_cast<std::size_t>(destination_y) * image.width + x] =
+            Rgb565(pixel[0], pixel[1], pixel[2]);
+      }
+      ++destination_y;
+    }
+  }
+  if (!jpeg_finish_decompress(&state->decoder)) {
+    image = {}; error = "incomplete JPEG data"; return false;
+  }
+  return true;
+}
+
+bool DecodeImage(const std::string& path, CachedImage& image, std::string& error) {
+  std::array<unsigned char, 8> signature{};
+  std::FILE* file = std::fopen(path.c_str(), "rb");
+  if (!file) { error = "cannot open artwork"; return false; }
+  const auto length = std::fread(signature.data(), 1, signature.size(), file);
+  std::fclose(file);
+  if (length == signature.size() && png_sig_cmp(signature.data(), 0, signature.size()) == 0)
+    return DecodePng(path, image, error);
+  if (length >= 3 && signature[0] == 0xff && signature[1] == 0xd8 && signature[2] == 0xff)
+    return DecodeJpeg(path, image, error);
+  error = "unsupported artwork format (PNG/JPEG required)";
+  return false;
+}
+
 }  // namespace
 
 ImageCache::ImageCache(const std::size_t max_entries) : max_entries_(max_entries) {}
 
 const CachedImage* ImageCache::LoadPng(const std::string& path, std::string& error) {
+  return LoadImage(path, error);
+}
+
+const CachedImage* ImageCache::LoadImage(const std::string& path, std::string& error) {
   error.clear();
   if (path.empty()) {
     error = "no artwork path";
@@ -147,7 +255,8 @@ const CachedImage* ImageCache::LoadPng(const std::string& path, std::string& err
 
   Entry entry;
   entry.last_used = ++use_counter_;
-  if (!DecodePng(path, entry.image, entry.error)) {
+  if (!DecodeImage(path, entry.image, entry.error)) {
+    entry.image = {};
     error = entry.error;
   }
   const auto [it, inserted] = entries_.emplace(path, std::move(entry));

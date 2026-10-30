@@ -12,6 +12,7 @@ void DrawHome(render::Surface240& surface,
               const ui::UIState& state,
               const render::Theme& theme) {
   const std::vector<std::string> items = {
+      "Game Bird Nest",
       state.continue_available ? "Continue playing" : "Continue (no recent game)",
       "Browse games", "Recent", "Favorites", "Tools", "Settings",
   };
@@ -19,7 +20,7 @@ void DrawHome(render::Surface240& surface,
   widgets::DrawContentText(surface, 16, 40,
       state.continue_available ? state.continue_title : "Your next game starts here",
       state.continue_available ? theme.accent : theme.text_dim);
-  widgets::DrawList(surface, 16, 64, 208, 132, 22, items, state.home_selected, theme);
+  widgets::DrawList(surface, 16, 58, 208, 140, 20, items, state.home_selected, theme);
   widgets::DrawMenuFooter(surface, theme, "A:OPEN  B:BACK  START:BACK");
 }
 

@@ -101,6 +101,28 @@ std::string NormalizeTitle(const std::string& filename_stem) {
   return collapsed;
 }
 
+std::string NestLauncherTitle(const std::filesystem::path& file) {
+  // Native Nest uses a stable slug for its launcher filename. Keep the display
+  // title in a comment so daemon rescans retain the publisher's game title.
+  std::ifstream in(file, std::ios::binary);
+  std::string header(4096, '\0');
+  in.read(header.data(), static_cast<std::streamsize>(header.size()));
+  header.resize(static_cast<std::size_t>(in.gcount()));
+  constexpr std::string_view prefix = "# GameBird Nest title: ";
+  std::istringstream lines(header);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (!line.starts_with(prefix)) continue;
+    auto title = line.substr(prefix.size());
+    if (!title.empty() && title.back() == '\r') title.pop_back();
+    if (title.empty() || title.size() > 240 ||
+        std::any_of(title.begin(), title.end(), [](unsigned char c) { return c < 32 || c == 127; }))
+      return {};
+    return title;
+  }
+  return {};
+}
+
 std::int64_t LastWriteSeconds(const std::filesystem::path& path) {
   std::error_code ec;
   const auto ftime = std::filesystem::last_write_time(path, ec);
@@ -431,7 +453,10 @@ bool RunIncrementalScan(Database& db, const ScanConfig& config, ScanStats& stats
             break;
           }
 
-          const std::string title = NormalizeTitle(file_path.stem().string());
+          std::string title;
+          if (system_id == "apps" && ToLower(file_path.extension().string()) == ".sh")
+            title = NestLauncherTitle(file_path);
+          if (title.empty()) title = NormalizeTitle(file_path.stem().string());
           GameRecord game{};
           game.system_id = system_id;
           game.library_root = result.state.root_path;

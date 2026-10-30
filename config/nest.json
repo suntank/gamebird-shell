@@ -1,0 +1,5 @@
+{
+  "api_base_url": "https://dbworker.suntank.workers.dev",
+  "cdn_base_url": "https://cdn.gamebird.games",
+  "timeout_seconds": 10
+}

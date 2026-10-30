@@ -11,7 +11,24 @@ option(GBSHELL_BUILD_SERVICES "Build gblibd and gblaunch" ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 find_package(PNG REQUIRED)
+find_package(JPEG REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(Threads REQUIRED)
+find_library(LIBARCHIVE_LIBRARY NAMES archive)
+if(NOT LIBARCHIVE_LIBRARY)
+  find_file(LIBARCHIVE_LIBRARY NAMES libarchive.so.13
+    PATHS /lib/${CMAKE_LIBRARY_ARCHITECTURE} /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE})
+endif()
+if(NOT LIBARCHIVE_LIBRARY)
+  message(FATAL_ERROR "libarchive is required for native Nest game packages")
+endif()
+
+add_library(gbshell_nest STATIC src/nest/service.cpp)
+target_include_directories(gbshell_nest PUBLIC src)
+target_link_libraries(gbshell_nest PUBLIC PkgConfig::CURL OpenSSL::Crypto ${LIBARCHIVE_LIBRARY})
+target_compile_options(gbshell_nest PRIVATE -Wall -Wextra -Wpedantic)
 
 find_library(SQLITE3_LIBRARY NAMES sqlite3)
 if(NOT SQLITE3_LIBRARY)
@@ -70,7 +87,7 @@ if(BUILD_TESTING)
     src/render/surface_240.cpp
   )
   target_include_directories(image_cache_test PRIVATE src)
-  target_link_libraries(image_cache_test PRIVATE PNG::PNG)
+  target_link_libraries(image_cache_test PRIVATE PNG::PNG JPEG::JPEG)
   target_compile_options(image_cache_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME image_cache_test COMMAND image_cache_test)
 
@@ -85,7 +102,7 @@ if(BUILD_TESTING)
     src/render/theme.cpp
   )
   target_include_directories(browser_screens_test PRIVATE src)
-  target_link_libraries(browser_screens_test PRIVATE PNG::PNG)
+  target_link_libraries(browser_screens_test PRIVATE PNG::PNG JPEG::JPEG)
   target_compile_options(browser_screens_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME browser_screens_test COMMAND browser_screens_test)
 
@@ -169,6 +186,7 @@ add_library(gbshell_runtime OBJECT
   src/ui/screens/tools.cpp
   src/ui/screens/wifi.cpp
   src/ui/screens/update.cpp
+  src/ui/screens/nest.cpp
   src/ui/widgets/list.cpp
   src/ui/widgets/grid.cpp
   src/ui/widgets/text.cpp
@@ -202,7 +220,7 @@ set_source_files_properties(
   PROPERTIES COMPILE_OPTIONS "-O0")
 
 target_include_directories(gbshell_runtime PUBLIC src)
-target_link_libraries(gbshell_runtime PUBLIC PkgConfig::SDL2 ${SQLITE3_LIBRARY} PNG::PNG)
+target_link_libraries(gbshell_runtime PUBLIC PkgConfig::SDL2 ${SQLITE3_LIBRARY} PNG::PNG JPEG::JPEG gbshell_nest Threads::Threads)
 target_compile_options(gbshell_runtime PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(gbshell src/main.cpp)
@@ -250,6 +268,27 @@ if(GBSHELL_BUILD_SERVICES)
 endif()
 
 if(BUILD_TESTING)
+  add_executable(ui_preview tools/ui_preview.cpp)
+  target_link_libraries(ui_preview PRIVATE gbshell_runtime)
+
+  add_executable(nest_service_test tests/nest_service_test.cpp)
+  target_link_libraries(nest_service_test PRIVATE gbshell_nest)
+  target_compile_options(nest_service_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME nest_service_test COMMAND nest_service_test)
+
+  add_executable(nest_launch_compat_test tests/nest_launch_compat_test.cpp
+    src/platform/proc.cpp ${GBSHELL_DB_SOURCES} src/core/logging.cpp src/core/time.cpp)
+  target_link_libraries(nest_launch_compat_test PRIVATE gbshell_nest ${SQLITE3_LIBRARY})
+  target_compile_options(nest_launch_compat_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME nest_launch_compat_test COMMAND nest_launch_compat_test)
+
+  add_executable(nest_ui_test tests/nest_ui_test.cpp
+    src/ui/widgets/list.cpp src/ui/widgets/text.cpp
+    src/render/image_cache.cpp src/render/surface_240.cpp src/render/theme.cpp)
+  target_link_libraries(nest_ui_test PRIVATE gbshell_nest PNG::PNG JPEG::JPEG Threads::Threads)
+  target_compile_options(nest_ui_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME nest_ui_test COMMAND nest_ui_test)
+
   add_executable(play_session_test tests/play_session_test.cpp
     src/core/play_session.cpp src/core/launch_config.cpp src/db/db.cpp
     src/core/logging.cpp src/core/time.cpp)

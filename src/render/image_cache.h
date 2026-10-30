@@ -20,6 +20,8 @@ class ImageCache {
  public:
   explicit ImageCache(std::size_t max_entries = 8);
 
+  // Detects PNG/JPEG from file bytes, including images with cached .png names.
+  const CachedImage* LoadImage(const std::string& path, std::string& error);
   const CachedImage* LoadPng(const std::string& path, std::string& error);
   void Clear();
 

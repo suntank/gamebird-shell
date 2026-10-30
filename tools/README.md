@@ -11,10 +11,9 @@ Helper scripts can be added here for:
 Render representative menus at the native 240×240 resolution without the Pi:
 
 ```sh
-c++ -std=c++20 -Isrc tools/ui_preview.cpp src/ui/screens/*.cpp \
-  src/ui/widgets/list.cpp src/ui/widgets/text.cpp src/render/surface_240.cpp \
-  src/render/theme.cpp src/render/image_cache.cpp -lpng -o /tmp/gamebird-ui-preview
-/tmp/gamebird-ui-preview /tmp/gamebird-ui
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build --target ui_preview -j2
+./build/ui_preview /tmp/gamebird-ui
 ```
 
 The output contains PPM images for browsing, settings, tools, details, progress,
@@ -35,3 +34,9 @@ This also checks navigation and selection restoration; it does not launch games
 or access the Pi. `play_session_test` covers save promotion and backups, while
 `gblaunch_session_test` exercises the real helper with a simulated RetroArch
 process (requires Python 3).
+
+`./build/nest_ui_test /tmp/gamebird-nest-previews` renders the native Nest
+screens from local fixtures and checks browsing, filtering, PIN locking,
+ratings, installation progress, and back navigation without a network request.
+`nest_service_test` and `nest_launch_compat_test` exercise package integrity,
+safe extraction, rollback, legacy migration and shell library integration.
