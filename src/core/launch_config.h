@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <map>
 #include <vector>
 
 #include "db/db.h"
@@ -27,6 +28,9 @@ struct EffectiveLaunch {
   std::string effective_core;
   std::string core_source;  // "definition", "system override", or "game override"
   std::vector<std::string> append_configs;
+  std::string working_directory;
+  std::string log_path;
+  std::map<std::string, std::string> environment;
 };
 
 bool TokenizeLaunchCommand(const std::string& command,

@@ -163,11 +163,13 @@ int main(int argc, char** argv) {
   std::ofstream(args.nest_config) << "{\"api_base_url\":\"file://" << dir.string()
       << "\",\"cdn_base_url\":\"file://" << dir.string()
       << "\",\"legacy_data_dir\":\"" << (dir / "legacy-store").string() << "\"}";
-  std::ofstream(fs::path(args.systems_dir) / "apps.json") << R"({"id":"apps","name":"GAMEBIRD","rom_extensions":[".sh"],"launch_type":"exec","launch_template":"{rom_path}"})";
-  std::ofstream(nest / "games" / "Test Game.sh") << "#!/bin/sh\nexit 0\n";
+  std::ofstream(fs::path(args.systems_dir) / "apps.json") << R"({"id":"apps","name":"GAMEBIRD","rom_extensions":[".gbgame"],"launch_type":"exec","launch_template":"{rom_path}"})";
+  fs::create_directories(nest / "games/test-game");
+  std::ofstream(nest / "games/test-game/game.json") << R"({"format_version":1,"runtime":"python3","entrypoint":"main.py"})";
+  std::ofstream(nest / "games/test-game/main.py") << "print('fixture')\n";
   std::ofstream(nest / "installed_games.json") << "{\"games\":[{\"id\":\"test-game\",\"title\":\"Test Game!\","
-      << "\"installed_version\":\"1.0.0\",\"install_path\":\"" << (nest / "games").string()
-      << "\",\"installed_files\":[\"Test Game.sh\"]}]}";
+      << "\"installed_version\":\"1.0.0\",\"package_format_version\":1,\"install_path\":\"" << (nest / "games/test-game").string()
+      << "\",\"installed_files\":[\"game.json\",\"main.py\"]}]}";
   ui.screen = Screen::Home;
   ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Nest);
   SavePreview(previews, "08-nest-start-menu", ui, lib);

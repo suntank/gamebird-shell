@@ -33,6 +33,8 @@ class Json {
   bool IsObject() const {
     return std::holds_alternative<Object>(value_);
   }
+  bool IsArray() const { return std::holds_alternative<Array>(value_); }
+  bool IsString() const { return std::holds_alternative<std::string>(value_); }
   const Array& Items() const {
     static const Array empty;
     auto p=std::get_if<Array>(&value_);

@@ -139,7 +139,8 @@ int main(int argc, char** argv) {
   gb::nest::InstalledGame installed;
   installed.id = game.slug; installed.title = game.title;
   installed.installed_version = game.version;
-  installed.install_path = config.games_dir; installed.launcher_path = config.launchers_dir / "nest-sky-garden.sh";
+  installed.install_path = config.games_dir / game.slug; installed.launcher_path = config.launchers_dir / "nest-sky-garden.gbgame";
+  installed.package_format_version = 1;
   s.installed = {{game.slug, installed}}; s.ratings = {{game.slug, 4}};
   s.view = View::Installed;
   draw("06-nest-installed");
@@ -205,7 +206,7 @@ int main(int argc, char** argv) {
   fs::create_directories(config.games_dir);
   std::ofstream(config.data_dir / "installed_games.json") <<
       "{\"games\":[{\"id\":\"sky-garden\",\"title\":\"Sky Garden\",\"installed_version\":\"1.2.0\",\"install_path\":\"" <<
-      config.games_dir.string() << "\",\"installed_files\":[],\"launcher_path\":\"" << installed.launcher_path.string() << "\"}]}";
+      installed.install_path.string() << "\",\"package_format_version\":1,\"installed_files\":[],\"launcher_path\":\"" << installed.launcher_path.string() << "\"}]}";
   s.parental_enabled = s.parental_locked = false;
   s.Details(game.slug, View::Installed); Wait(controller);
   Expect(s.manifest && s.manifest->title == game.title && s.error.empty(), "installed details work offline without a cached manifest");

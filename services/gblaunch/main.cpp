@@ -58,6 +58,14 @@ Args ParseArgs(const int argc, char** argv) {
   return out;
 }
 
+void WriteResult(const Args& args, const std::string& message) {
+  if (args.dry_run || args.game_id <= 0) return;
+  const auto path = gb::core::PlayResultPath(args.db_path, args.game_id);
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  std::ofstream(path) << message << '\n';
+}
+
 bool BuildOverrideAppendConfig(const gb::db::LaunchOverride& merged_override,
                                const int game_id,
                                std::string& out_path,
@@ -266,12 +274,18 @@ int main(int argc, char** argv) {
   if (!gb::core::ResolveEffectiveLaunch(db, args.game_id, effective, build_error)) {
     gb::core::Log(gb::core::LogLevel::Error,
                   "launch resolution failed: " + build_error);
+    WriteResult(args, "Cannot launch: " + build_error);
     return 1;
   }
   std::vector<std::string> cmd_argv = effective.argv;
   if (!LogLaunchIssues(effective)) {
     gb::core::Log(gb::core::LogLevel::Error,
                   "launch blocked by invalid effective configuration");
+    for (const auto& issue : gb::core::ValidateEffectiveLaunch(effective)) {
+      if (issue.severity != gb::core::LaunchIssueSeverity::Error) continue;
+      WriteResult(args, issue.message);
+      break;
+    }
     return 1;
   }
   LogEffectiveLaunch(effective);
@@ -303,6 +317,7 @@ int main(int argc, char** argv) {
   if (!args.dry_run && !session.Prepare(args.db_path, effective, args.play_mode, cmd_argv, build_error)) {
     gb::core::Log(gb::core::LogLevel::Error, "session preparation failed: " + build_error);
     cleanup_override_append();
+    WriteResult(args, build_error);
     return 1;
   }
 
@@ -323,23 +338,37 @@ int main(int argc, char** argv) {
                 "launching game_id=" + std::to_string(effective.info.game_id) +
                     " title=\"" + effective.info.title + "\"");
 
-  const auto result = gb::platform::RunProcessBlocking(cmd_argv);
+  gb::platform::ProcessOptions process;
+  process.working_directory = effective.working_directory;
+  process.log_path = effective.log_path;
+  process.environment = effective.environment;
+  if (!process.working_directory.empty()) {
+    try {
+      std::filesystem::create_directories(process.environment.at("GAMEBIRD_SAVE_DIR"));
+      std::filesystem::create_directories(std::filesystem::path(process.log_path).parent_path());
+    } catch (const std::exception& error) {
+      WriteResult(args, std::string("Cannot prepare game storage: ") + error.what());
+      cleanup_override_append();
+      return 1;
+    }
+  }
+  const auto result = gb::platform::RunProcessBlocking(cmd_argv, process);
   if (!result.launched) {
     gb::core::Log(gb::core::LogLevel::Error,
                   "launch failed: " + result.error);
+    WriteResult(args, "Cannot launch: " + result.error);
     cleanup_override_append();
     return 1;
   }
 
   std::string session_status;
   session.Finish(result.exited_normally && result.exit_code == 0, session_status);
-  {
-    const auto path = gb::core::PlayResultPath(args.db_path, effective.info.game_id);
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream receipt(path);
-    receipt << session_status << '\n';
+  if (!effective.working_directory.empty() && result.exit_code != 0) {
+    session_status = result.signaled ? "Game stopped by signal " + std::to_string(result.signal)
+                                    : "Game exited with code " + std::to_string(result.exit_code);
+    session_status += "; see Nest log";
   }
+  WriteResult(args, session_status);
   gb::core::Log(gb::core::LogLevel::Info, session_status);
 
   if (result.exited_normally && result.exit_code == 0 &&

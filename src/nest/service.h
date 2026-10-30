@@ -14,8 +14,8 @@ struct Config {
   std::string api_base_url = "https://dbworker.suntank.workers.dev";
   std::string cdn_base_url = "https://cdn.gamebird.games";
   fs::path data_dir;
-  fs::path games_dir;       // Shared package payload root, outside library scanning.
-  fs::path launchers_dir;   // Configured shell apps root. Empty uses games_dir.
+  fs::path games_dir;       // One package directory per slug, outside library scanning.
+  fs::path launchers_dir;   // Library records (.gbgame), separate from game payloads.
   fs::path legacy_games_dir;
   fs::path legacy_data_dir;
   std::string device_id;    // Empty reads Raspberry Pi serial; never invents an ID.
@@ -58,6 +58,7 @@ struct InstalledGame {
   std::string id, title, installed_version;
   fs::path install_path, launcher_path;
   std::vector<std::string> installed_files;
+  int package_format_version = 0;
 };
 struct UpdateInfo { std::string game_id, title, installed_version, latest_version; };
 struct Progress { std::string stage; std::uint64_t completed = 0, total = 0; };

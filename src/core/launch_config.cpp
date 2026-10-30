@@ -1,4 +1,5 @@
 #include "core/launch_config.h"
+#include "nest/package.h"
 
 #include <algorithm>
 #include <cctype>
@@ -274,6 +275,24 @@ bool ResolveEffectiveLaunch(db::Database& db,
   out = EffectiveLaunch{};
   out.info = info;
 
+  if (info.launch_type == "exec" && std::filesystem::path(info.rom_path).extension() == ".gbgame") {
+    try {
+      const auto package = nest::ReadPackageLaunch(info.rom_path);
+      out.argv = package.argv;
+      out.working_directory = package.directory.string();
+      out.log_path = package.log_path.string();
+      out.environment = {{"GAMEBIRD_SAVE_DIR", package.save_directory.string()},
+                         {"GAMEBIRD_GAME_DIR", package.directory.string()},
+                         {"GAMEBIRD_GAME_ID", package.id},
+                         {"PYTHONDONTWRITEBYTECODE", "1"}};
+      out.core_source = "definition";
+      return true;
+    } catch (const std::exception& exception) {
+      error = exception.what();
+      return false;
+    }
+  }
+
   const std::string launch_template =
       info.launch_template.empty() ? "{rom_path}" : info.launch_template;
   if (!TokenizeLaunchCommand(launch_template, out.argv, error)) {
@@ -356,10 +375,13 @@ std::vector<LaunchIssue> ValidateEffectiveLaunch(const EffectiveLaunch& launch) 
     AddIssue(issues, LaunchIssueSeverity::Error,
              "ROM/app path is missing: " + launch.info.rom_path);
   }
-  for (const auto& token : launch.argv) {
-    if (token.find('{') != std::string::npos || token.find('}') != std::string::npos) {
-      AddIssue(issues, LaunchIssueSeverity::Error,
-               "unresolved template variable in argument: " + token);
+  // Package manifest arguments are literal, so braces are allowed in them.
+  if (launch.working_directory.empty()) {
+    for (const auto& token : launch.argv) {
+      if (token.find('{') != std::string::npos || token.find('}') != std::string::npos) {
+        AddIssue(issues, LaunchIssueSeverity::Error,
+                 "unresolved template variable in argument: " + token);
+      }
     }
   }
 

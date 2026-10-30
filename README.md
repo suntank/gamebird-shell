@@ -83,11 +83,19 @@ reboot the device. Network and package operations run on a background worker.
 Nest uses the existing Worker API and CDN. It caches catalog data for offline
 browsing and checks package size and SHA-256 before installing. Updates stage
 and verify their contents before replacing an installed game. Game payloads
-live under `nest/games` beside the catalog database; one launcher per game is
-placed in the configured `apps` library root. Installs and removals refresh the
+live under `nest/games/<store-slug>` beside the catalog database; one `.gbgame`
+data record per game is placed in the configured `apps` library root. Installs and removals refresh the
 shell catalog immediately. Games appear in the **GAMEBIRD** system, and Play
 from Nest uses the normal shell launch lifecycle. Downloaded games may have
 their own runtime requirements, including Python; Nest itself has none.
+
+Packages require a root-level `game.json` declaring format 1, a `python3` or
+`native` runtime, a relative entrypoint, and optional arguments. GameBird runs
+the entrypoint directly with the package as its working directory. Games use
+`GAMEBIRD_SAVE_DIR` for persistent progress; saves survive updates and removal.
+The latest launch log is kept in `nest/logs/<store-slug>.log`. See
+[Nest package instructions](docs/nest-packages.md) for the exact ZIP layout,
+manifest, Python save example, and Cloudflare metadata changes.
 
 Settings are read from `nest.json` beside `--settings`, or a file selected with
 `--nest-config`. The bundled file supplies the production API/CDN URLs and
@@ -98,11 +106,10 @@ the protected Pi image. The updater installs the native libraries when needed.
 
 On first use, Nest imports the previous `~/gamebird/store` registry, catalog,
 ratings, and parental PIN without replacing existing native data. Existing
-game payloads remain in `~/gamebird/games`, and Nest creates shell launchers
-for them. For an image migrated from another Linux account, set
+game payloads remain in `~/gamebird/games`. Script-only games must be replaced
+with the new `game.json` packages before they can launch from Nest. For an image migrated from another Linux account, set
 `legacy_data_dir` and `legacy_games_dir` in `nest.json` to those original
-directories before first opening Nest. Known legacy game launcher paths are
-adapted to the configured install directory. Keep the old store and game
+directories before first opening Nest. Keep the old store and game
 directories until migration has been checked on the device.
 
 ### Continue playing

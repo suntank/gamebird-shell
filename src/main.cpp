@@ -3235,8 +3235,8 @@ gb::nest::Config NestConfig(const Args& args) {
   };
   const auto app_system = find_system("apps");
   if (app_system == systems.end() || app_system->launch_type != "exec" ||
-      std::find(app_system->rom_extensions.begin(), app_system->rom_extensions.end(), ".sh") == app_system->rom_extensions.end())
-    throw std::runtime_error("Nest needs an apps system that launches .sh games");
+      std::find(app_system->rom_extensions.begin(), app_system->rom_extensions.end(), ".gbgame") == app_system->rom_extensions.end())
+    throw std::runtime_error("Nest needs an apps system that supports .gbgame packages");
   const auto contains = [](const fs::path& root, const fs::path& path) {
     const auto base = fs::weakly_canonical(fs::absolute(root));
     const auto target = fs::weakly_canonical(fs::absolute(path));
@@ -3250,7 +3250,7 @@ gb::nest::Config NestConfig(const Args& args) {
     const auto expanded = ExpandHomePath(root);
     if (contains(expanded, config.launchers_dir)) {
       // Match the scanner's folder precedence: a psx/snes folder must not
-      // accidentally turn the generated .sh launcher into an ignored sidecar.
+      // accidentally turn the generated library record into an ignored sidecar.
       const auto relative = fs::weakly_canonical(config.launchers_dir).lexically_relative(fs::weakly_canonical(expanded));
       auto classified = relative.empty() ? systems.end() : find_system(relative.begin()->string());
       if (classified == systems.end()) classified = find_system(fs::path(expanded).filename().string());

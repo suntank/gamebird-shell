@@ -174,119 +174,106 @@ namespace {
 
   }
   void InstallTests(gb::nest::Service& service,const gb::nest::Config& c){
-    auto m=Package(c,"1.0",{
-      {
-        "game/Fixture.sh","#!/bin/sh\nexit 0\n"
-      },
-      {
-        "game/payload/data.txt","original"
-      },
-      {
-        "game/obsolete.txt","old"
-      }
-    } );
+    const std::string manifest=R"({"format_version":1,"runtime":"python3","entrypoint":"main.py","args":[]})";
+    auto m=Package(c,"1.0",{{"game.json",manifest},{"main.py","print('original')\n"},
+                           {"assets/data.txt","original"},{"obsolete.txt","old"}});
     service.Install(m);
     auto installed=service.LoadInstalled();
-    Check(installed.at("fixture").installed_version=="1.0","install registers version");
-    Check(Read(c.games_dir/"payload/data.txt")=="original"&&fs::exists(c.games_dir/"Fixture.sh"),"flatten optional game wrapper into payload root");
-    auto launcher=service.LaunchPath(installed.at("fixture"));
-    Check(fs::exists(launcher)&&(fs::status(launcher).permissions()&fs::perms::owner_exec)!=fs::perms::none,"native wrapper is executable");
-    auto changed=Package(c,"2.0",{
-      {
-        "Fixture.sh","#!/bin/sh\nexit 0\n"
-      },
-      {
-        "payload/data.txt","updated"
-      },
-      {
-        "new.txt","new"
+    const auto game=c.games_dir/"fixture";
+    Check(installed.at("fixture").installed_version=="1.0" &&
+          installed.at("fixture").package_format_version==1,"install registers version and package format");
+    Check(Read(game/"assets/data.txt")=="original" && fs::exists(game/"game.json"),
+          "package installs into its own slug directory without flattening");
+    const auto launcher=service.LaunchPath(installed.at("fixture"));
+    Check(launcher.extension()==".gbgame" && fs::exists(launcher),"library uses a data record instead of an executable shell wrapper");
+    Write(c.data_dir/"saves/fixture/save.dat","user save");
+    Write(c.games_dir/"another-game/data.txt","another game");
+    auto changed=Package(c,"2.0",{{"game.json",manifest},{"main.py","print('updated')\n"},
+                                {"assets/data.txt","updated"},{"new.txt","new"}});
+    Reject([&]{service.Install(changed,[](const gb::nest::Progress& progress){
+      return progress.stage!="Installing" || progress.completed==0;
+    });},"cancel during directory replacement rolls back");
+    Check(Read(game/"assets/data.txt")=="original" && fs::exists(game/"obsolete.txt") &&
+          !fs::exists(game/"new.txt"),"canceled commit restores the entire previous package");
+    Check(service.LoadInstalled().at("fixture").installed_version=="1.0" && fs::exists(launcher),
+          "rollback preserves registry version and library record");
+    const auto registry=c.data_dir/"installed_games.json";
+    const auto backup=c.data_dir/"registry-backup.json";
+    Reject([&]{service.Install(changed,[&](const gb::nest::Progress& progress){
+      if (progress.stage=="Installing" && progress.completed==1) {
+        fs::rename(registry,backup);
+        fs::create_directory(registry);  // Fail the later atomic registry replacement.
       }
-    } );
-    Reject([&]{
-      service.Install(changed,[](const gb::nest::Progress& p){
-        return p.stage!="Installing"||p.completed==0;
-      } );
-    },
-    "cancel during commit rolls back");
-    Check(Read(c.games_dir/"payload/data.txt")=="original"&&fs::exists(c.games_dir/"obsolete.txt")&&!fs::exists(c.games_dir/"new.txt"),"canceled commit restores old files and removes new files");
-    Check(service.LoadInstalled().at("fixture").installed_version=="1.0"&&(fs::status(launcher).permissions()&fs::perms::owner_exec)!=fs::perms::none,"rollback preserves version and executable launcher");
+      return true;
+    });},"registry commit failure rolls back the staged package and library files");
+    fs::remove_all(registry);
+    fs::rename(backup,registry);
+    Check(Read(game/"assets/data.txt")=="original" &&
+          service.LoadInstalled().at("fixture").installed_version=="1.0" && fs::exists(launcher),
+          "registry failure keeps the previously installed game usable");
+    const auto invalid_update=Package(c,"2.0",{{"game.json",manifest}});
+    Reject([&]{service.Install(invalid_update);},"invalid update is validated before replacement");
+    Check(Read(game/"assets/data.txt")=="original","invalid manifest leaves the old package intact");
+    // Restore the valid ZIP bytes used by changed after creating invalid_update.
+    changed=Package(c,"2.0",{{"game.json",manifest},{"main.py","print('updated')\n"},
+                              {"assets/data.txt","updated"},{"new.txt","new"}});
     auto wrong=changed;
     wrong.download.sha256=std::string(64,'0');
-    Reject([&]{
-      service.Install(wrong);
-    },
-    "reject incorrect checksum");
-    Check(Read(c.games_dir/"payload/data.txt")=="original","integrity failure leaves installed version untouched");
+    Reject([&]{service.Install(wrong);},"reject incorrect checksum");
+    Check(Read(game/"assets/data.txt")=="original","integrity failure leaves installed version untouched");
     service.Install(changed);
-    Check(Read(c.games_dir/"payload/data.txt")=="updated"&&!fs::exists(c.games_dir/"obsolete.txt"),"successful update replaces payload and removes obsolete tracked files");
-    Write(c.games_dir/"payload/save.dat","user save");
+    Check(Read(game/"assets/data.txt")=="updated" && !fs::exists(game/"obsolete.txt"),
+          "successful update replaces only this game's package");
+    Check(Read(c.data_dir/"saves/fixture/save.dat")=="user save" &&
+          Read(c.games_dir/"another-game/data.txt")=="another game","updates preserve saves and other game directories");
     service.Uninstall("fixture");
-    Check(!fs::exists(launcher)&&!fs::exists(c.games_dir/"payload/data.txt")&&fs::exists(c.games_dir/"payload/save.dat"),"uninstall removes owned files and preserves user saves");
-    auto traversal=Package(c,"1.0",{
-      {
-        "../escape.txt","bad"
-      },
-      {
-        "Fixture.sh","#!/bin/sh\n"
-      }
-    } );
-    Reject([&]{
-      service.Install(traversal);
-    },
-    "reject ZIP path traversal");
-    Check(!fs::exists(c.games_dir.parent_path()/"escape.txt"),"archive never escapes staging root");
-    auto link=Package(c,"1.0",{
-      {
-        "Fixture.sh","/etc/passwd"
-      }
-    },
-    true);
-    Reject([&]{
-      service.Install(link);
-    },
-    "reject archive symbolic links");
-    Write(c.games_dir/"untouched.txt","unowned");
-    auto collision=Package(c,"1.0",{
-      {
-        "Fixture.sh","#!/bin/sh\n"
-      },
-      {
-        "untouched.txt","replace"
-      }
-    } );
-    Reject([&]{
-      service.Install(collision);
-    },
-    "reject overwriting unowned files");
-    Check(Read(c.games_dir/"untouched.txt")=="unowned","collision preserves unrelated files");
-    fs::create_directory_symlink(c.data_dir,c.games_dir/"link");
-    auto destination=Package(c,"1.0",{
-      {
-        "Fixture.sh","#!/bin/sh\n"
-      },
-      {
-        "link/attack.txt","bad"
-      }
-    } );
-    Reject([&]{
-      service.Install(destination);
-    },
-    "reject symlink in install destination");
-    Check(!fs::exists(c.data_dir/"attack.txt"),"symlink rejection preserves destination outside payload");
-    const auto wrapper = c.launchers_dir/"nest-fixture.sh";
-    Write(wrapper, "unrelated user script");
-    const auto valid = Package(c,"1.0",{{"Fixture.sh","#!/bin/sh\nexit 0\n"}});
-    Reject([&]{service.Install(valid);}, "refuse to overwrite an unowned launcher");
-    Check(Read(wrapper)=="unrelated user script", "launcher collision leaves user script intact");
-    fs::remove(wrapper);
-    const auto outside = c.data_dir/"outside-script";
-    Write(outside, "keep outside file");
-    fs::create_symlink(outside,wrapper);
-    Reject([&]{service.Install(valid);}, "refuse a launcher symlink before touching installed files");
-    Check(fs::is_symlink(wrapper)&&Read(outside)=="keep outside file", "launcher validation leaves external file and symlink untouched");
-    fs::remove(wrapper);
+    Check(!fs::exists(launcher) && !fs::exists(game) &&
+          Read(c.data_dir/"saves/fixture/save.dat")=="user save","uninstall removes package but preserves external saves");
+    service.Install(changed);
+    Check(Read(c.data_dir/"saves/fixture/save.dat")=="user save","reinstall keeps the same persistent save directory");
+    service.Uninstall("fixture");
 
+    auto traversal=Package(c,"1.0",{{"../escape.txt","bad"},{"game.json",manifest},{"main.py","pass"}});
+    Reject([&]{service.Install(traversal);},"reject ZIP path traversal");
+    Check(!fs::exists(c.games_dir.parent_path()/"escape.txt"),"archive never escapes staging root");
+    auto link=Package(c,"1.0",{{"game.json",manifest},{"main.py","/etc/passwd"}},true);
+    Reject([&]{service.Install(link);},"reject archive symbolic links");
+    const auto reject_package=[&](const std::map<std::string,std::string>& files,const char* message){
+      const auto package=Package(c,"1.0",files);
+      Reject([&]{service.Install(package);},message);
+      Check(!fs::exists(game),"rejected package leaves no game directory");
+    };
+    reject_package({{"Fixture.sh","#!/bin/sh\nexit 0\n"}},"shell-only packages require conversion to game.json");
+    reject_package({{"game/game.json",manifest},{"game/main.py","pass"}},"manifest must be at ZIP root; no wrapper is stripped");
+    reject_package({{"game.json",manifest}},"reject missing entrypoint");
+    reject_package({{"game.json",R"({"format_version":2,"runtime":"python3","entrypoint":"main.py"})"},{"main.py","pass"}},"reject unsupported format version");
+    reject_package({{"game.json",R"({"format_version":1,"runtime":"shell","entrypoint":"main.py"})"},{"main.py","pass"}},"reject unknown runtime");
+    reject_package({{"game.json",R"({"format_version":1,"runtime":"python3","entrypoint":"../outside.py"})"},{"main.py","pass"}},"reject escaping entrypoint");
+    reject_package({{"game.json",R"({"format_version":1,"runtime":"python3","entrypoint":"main.py","args":"--option"})"},{"main.py","pass"}},"reject non-array args");
+    reject_package({{"game.json",R"({"format_version":1,"runtime":"python3","entrypoint":"main.py","args":[3]})"},{"main.py","pass"}},"reject non-string args");
+
+    Write(game/"untouched.txt","unowned");
+    auto valid=Package(c,"1.0",{{"game.json",manifest},{"main.py","pass"}});
+    Reject([&]{service.Install(valid);},"refuse an unowned game directory");
+    Check(Read(game/"untouched.txt")=="unowned","collision preserves unrelated files");
+    fs::remove_all(game);
+    fs::create_directory_symlink(c.data_dir,game);
+    Reject([&]{service.Install(valid);},"reject a symlinked game directory");
+    Check(fs::is_symlink(game),"directory symlink is left untouched");
+    fs::remove(game);
+    const auto record=c.launchers_dir/"nest-fixture.gbgame";
+    Write(record,"unrelated user data");
+    Reject([&]{service.Install(valid);},"refuse to overwrite an unowned library record");
+    Check(Read(record)=="unrelated user data","record collision preserves user data");
+    fs::remove(record);
+    const auto outside=c.data_dir/"outside-record";
+    Write(outside,"keep outside file");
+    fs::create_symlink(outside,record);
+    Reject([&]{service.Install(valid);},"refuse a library record symlink");
+    Check(fs::is_symlink(record) && Read(outside)=="keep outside file","record validation preserves external files");
+    fs::remove(record);
   }
+
 }
 int main(){
   auto root=fs::temp_directory_path()/("nest-service-test-"+std::to_string(getpid()));

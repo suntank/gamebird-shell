@@ -1,6 +1,7 @@
 #include "nest/service.h"
 #include "nest/archive_api.h"
 #include "nest/json.h"
+#include "nest/package.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -437,86 +438,12 @@ Json Api(const Config& c,const std::string& path,const std::string& method="GET"
   return j;
 }
 
-std::string ShellQuote(const std::string& s) {
-  std::string out="'";
-  for (char c:s)out+=c=='\''?"'\\''":std::string(1,c);
-  return out+"'";
-}
-
-std::string RewriteLauncher(const std::string& source,const fs::path& root) {
-  const std::vector<std::string> prefixes={
-    "/home/pi/gamebird/games","/home/gamebird/gamebird/games","${HOME}/gamebird/games","$HOME/gamebird/games"
-  };
-  std::string result;
-  char quote=0;
-  bool escaped=false;
-  bool comment=false;
-  for (std::size_t i=0;i<source.size();) {
-    if (comment) {
-      char c=source[i++];
-      result+=c;
-      if (c=='\n')comment=false;
-      continue;
-    }
-    if (!quote&&!escaped&&source[i]=='#'&&(i==0||source[i-1]=='\n'||std::isspace(static_cast<unsigned char>(source[i-1])))) {
-      comment=true;
-      continue;
-    }
-    bool matched=false;
-    if (!escaped)for (const auto& p:prefixes)if (source.compare(i,p.size(),p)==0&&(i+p.size()==source.size()||source[i+p.size()]=='/'||source[i+p.size()]=='\''||source[i+p.size()]=='"'||std::isspace(static_cast<unsigned char>(source[i+p.size()])))) {
-      auto replacement=root.string();
-      if (!quote)replacement=ShellQuote(replacement);
-      else if (quote=='"') {
-        std::string x;
-        for (char c:replacement) {
-          if (c=='\\'||c=='"'||c=='$'||c=='`')x+='\\';
-          x+=c;
-        }
-        replacement=x;
-      } else {
-        std::string x;
-        for (char c:replacement)x+=c=='\''?"'\\''":std::string(1,c);
-        replacement=x;
-      }
-      result+=replacement;
-      i+=p.size();
-      matched=true;
-      break;
-    }
-    if (matched)continue;
-    char c=source[i++];
-    result+=c;
-    if (escaped) {
-      escaped=false;
-      continue;
-    }
-    if (c=='\\'&&quote!='\'') {
-      escaped=true;
-      continue;
-    }
-    if (c=='\''||c=='"') {
-      if (!quote)quote=c;
-      else if (quote==c)quote=0;
-    }
-  }
-  return result;
-}
-
-fs::path SafeRelative(const std::string& name,bool flatten=false) {
+fs::path SafeRelative(const std::string& name) {
   if (name.empty()||name.size()>4096||name.find('\\')!=std::string::npos||name.find(':')!=std::string::npos||name.find('\0')!=std::string::npos)Fail("Unsafe package path");
   fs::path p(name);
   if (p.is_absolute()||p.has_root_name())Fail("Unsafe absolute package path");
   for (const auto& c:p)if (c=="..")Fail("Unsafe parent path in package");
   p=p.lexically_normal();
-  if (flatten) {
-    auto it=p.begin();
-    if (it!=p.end()&&*it=="game") {
-      ++it;
-      fs::path q;
-      for (;it!=p.end();++it)q/=*it;
-      p=q;
-    }
-  }
   if (p.empty()||p==".")return {};
   for (const auto& c:p)if (c=="."||c==".."||c.string().rfind(".nest-",0)==0)Fail("Reserved package path");
   return p;
@@ -538,34 +465,43 @@ bool AllowedInstall(const Config& c,const fs::path& p) {
 }
 
 bool ManagedLauncher(const fs::path& path) {
-  if (!fs::is_regular_file(path)) return false;
+  if (!fs::is_regular_file(path) || fs::is_symlink(path)) return false;
+  try { return ReadJson(path)["managed_by"].String() == "gamebird-nest"; }
+  catch (const std::exception&) { return false; }
+}
+
+bool LegacyLauncher(const fs::path& path) {
+  if (!fs::is_regular_file(path) || fs::is_symlink(path)) return false;
+  try { return ReadText(path,4096).find("# Managed by Game Bird Nest.\n")!=std::string::npos; }
+  catch (const std::exception&) { return false; }
+}
+
+bool RetireLegacyLauncher(const Config& config,const std::string& slug) {
   try {
-    return ReadText(path, 4096).find("# Managed by Game Bird Nest.\n") != std::string::npos;
-  } catch (const std::exception&) {
-    return false;
-  }
+    const auto path=config.launchers_dir/("nest-"+slug+".sh");
+    if (!LegacyLauncher(path)) return false;
+    std::error_code error;
+    const bool removed=fs::remove(path,error);
+    if (removed && !fs::exists(config.launchers_dir/("nest-"+slug+".gbgame"))) {
+      auto icon=path; icon.replace_extension(".png");
+      fs::remove(icon,error);
+    }
+    return removed;
+  } catch (const std::exception&) { return false; }
 }
 
 void ValidateLauncherDestination(const Config& config, const std::string& slug) {
-  const auto launcher = config.launchers_dir / ("nest-" + slug + ".sh");
+  const auto launcher = config.launchers_dir / ("nest-" + slug + ".gbgame");
   auto icon = launcher;
   icon.replace_extension(".png");
   NoSymlinks(config.launchers_dir, launcher.filename());
   NoSymlinks(config.launchers_dir, icon.filename());
-  const bool managed = ManagedLauncher(launcher);
+  const bool managed = ManagedLauncher(launcher) ||
+      (!fs::exists(launcher) && LegacyLauncher(config.launchers_dir/("nest-"+slug+".sh")));
   if (fs::exists(launcher) && !managed)
-    Fail("A file outside Nest already uses this launcher name: " + launcher.string());
+    Fail("A file outside Nest already uses this library record: " + launcher.string());
   if (fs::exists(icon) && !managed)
     Fail("A file outside Nest already uses this artwork name: " + icon.string());
-}
-
-fs::path GameScript(const InstalledGame& game) {
-  const auto expected=game.title+".sh";
-  for (const auto& s:game.installed_files)if (fs::path(s).filename()==expected&&fs::path(s).parent_path().empty()&&fs::is_regular_file(game.install_path/s))return game.install_path/s;
-  for (const auto& s:game.installed_files)if (fs::path(s).parent_path().empty()&&fs::path(s).extension()==".sh"&&fs::is_regular_file(game.install_path/s))return game.install_path/s;
-  // The oldest registry did not track files, but still used <title>.sh.
-  if (fs::path(expected).filename()==expected&&fs::is_regular_file(game.install_path/expected))return game.install_path/expected;
-  return {};
 }
 
 void CopyLegacy(const Config& c) {
@@ -814,6 +750,7 @@ std::map<std::string,InstalledGame> Service::LoadInstalled() const {
     g.id=v["id"].String();
     g.title=v["title"].String();
     g.installed_version=v["installed_version"].String();
+    g.package_format_version=v["package_format_version"].Number()==1 ? 1 : 0;
     auto path=v["install_path"].String();
     if (!ValidSlug(g.id)||g.title.empty()||path.empty())continue;
     g.install_path=Normal(path);
@@ -829,7 +766,7 @@ std::map<std::string,InstalledGame> Service::LoadInstalled() const {
     auto launcher=v["launcher_path"].String();
     if (!launcher.empty()) {
       auto p=Normal(launcher);
-      if (Under(p,config_.launchers_dir)&&p.parent_path()==config_.launchers_dir&&p.filename()=="nest-"+g.id+".sh")g.launcher_path=p;
+      if (Under(p,config_.launchers_dir)&&p.parent_path()==config_.launchers_dir&&p.filename()=="nest-"+g.id+".gbgame")g.launcher_path=p;
     }
     out[g.id]=std::move(g);
   }
@@ -850,6 +787,7 @@ void Service::SaveInstalled(const std::map<std::string,InstalledGame>& games) co
       {
         "installed_version",g.installed_version
       },
+      {"package_format_version",g.package_format_version},
       {
         "install_path",g.install_path.string()
       },
@@ -869,57 +807,43 @@ void Service::SaveInstalled(const std::map<std::string,InstalledGame>& games) co
 }
 
 fs::path Service::LaunchPath(const InstalledGame& g) const {
-  if (!AllowedInstall(config_,g.install_path)||!ValidSlug(g.id))return {};
-  auto p=config_.launchers_dir/("nest-"+g.id+".sh");
-  if (ManagedLauncher(p))return p;
-  return GameScript(g);
+  if (g.package_format_version != 1 || !ValidSlug(g.id) ||
+      Normal(g.install_path) != Normal(config_.games_dir/g.id)) return {};
+  const auto path=config_.launchers_dir/("nest-"+g.id+".gbgame");
+  return ManagedLauncher(path) ? path : fs::path{};
 }
 
 void Service::WriteLauncher(InstalledGame& g) const {
-  if (!AllowedInstall(config_,g.install_path)||!ValidSlug(g.id))Fail("Unsafe installed game root");
+  if (g.package_format_version != 1 || !ValidSlug(g.id) ||
+      Normal(g.install_path) != Normal(config_.games_dir/g.id)) Fail("Unsafe installed game root");
+  NoSymlinks(config_.games_dir, g.id);
   ValidateLauncherDestination(config_, g.id);
-  auto script=GameScript(g);
-  if (script.empty())Fail("The game package has no top-level launcher");
-  NoSymlinks(g.install_path,script.lexically_relative(g.install_path));
-  const auto source=ReadText(script);
-  const auto rewritten=RewriteLauncher(source,g.install_path);
-  // Existing games may live on the old read-only image. Keep their payload
-  // untouched and place a compatible executable copy in writable Nest storage.
-  const bool legacy = !Under(g.install_path, config_.games_dir);
-  if (legacy && (rewritten!=source || (fs::status(script).permissions() & fs::perms::owner_exec)==fs::perms::none)) {
-    script=config_.data_dir/"cache/launchers"/(g.id+".sh");
-    bool same=fs::is_regular_file(script)&&ReadText(script)==rewritten;
-    if (!same)AtomicText(script,rewritten);
-    fs::permissions(script,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
-  } else {
-    if (rewritten!=source)AtomicText(script,rewritten);
-    if (!legacy)fs::permissions(script,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
-  }
+  ReadPackage(g.install_path);
   fs::create_directories(config_.launchers_dir);
-  g.launcher_path=config_.launchers_dir/("nest-"+g.id+".sh");
-  NoSymlinks(config_.launchers_dir,g.launcher_path.filename());
-  std::string title=g.title;
-  std::replace_if(title.begin(),title.end(),[](unsigned char c) {
-    return c<32||c==127;
-  },
-  ' ');
-  const auto text="#!/bin/sh\n# GameBird Nest title: "+title+"\n# Managed by Game Bird Nest.\ncd "+ShellQuote(g.install_path.string())+" || exit 1\nexec "+ShellQuote(script.string())+" \"$@\"\n";
-  bool same=false;
-  if (fs::is_regular_file(g.launcher_path))same=ReadText(g.launcher_path)==text;
-  if (!same)AtomicText(g.launcher_path,text);
-  fs::permissions(g.launcher_path,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
+  g.launcher_path=config_.launchers_dir/("nest-"+g.id+".gbgame");
+  const auto text=Json(Json::Object{
+    {"managed_by","gamebird-nest"}, {"format_version",1},
+    {"id",g.id}, {"title",g.title}, {"package_dir",g.install_path.string()},
+    {"save_dir",(config_.data_dir/"saves"/g.id).string()},
+    {"log_path",(config_.data_dir/"logs"/(g.id+".log")).string()}
+  }).Dump()+"\n";
+  if (!fs::is_regular_file(g.launcher_path) || ReadText(g.launcher_path)!=text)
+    AtomicText(g.launcher_path,text);
+  auto icon=g.launcher_path;
+  icon.replace_extension(".png");
   for (const auto& file:g.installed_files) {
-    auto p=fs::path(file);
-    if (p.filename()=="icon.png"||p.filename().string().ends_with("-icon.png")||p.filename().string().ends_with("_icon.png")) {
+    const auto p=fs::path(file);
+    if (p.filename()=="icon.png" || p.filename().string().ends_with("-icon.png") ||
+        p.filename().string().ends_with("_icon.png")) {
       NoSymlinks(g.install_path,p);
       if (fs::is_regular_file(g.install_path/p)) {
-        auto dest=g.launcher_path;
-        dest.replace_extension(".png");
-        AtomicText(dest,ReadText(g.install_path/p,8*1024*1024));
-        break;
+        AtomicText(icon,ReadText(g.install_path/p,8*1024*1024));
+        return;
       }
     }
   }
+  std::error_code error;
+  fs::remove(icon,error);
 }
 
 bool Service::RefreshLaunchers() {
@@ -927,21 +851,25 @@ bool Service::RefreshLaunchers() {
   bool changed=false;
   for (auto& [id,g]:games) {
     (void)id;
-    if (GameScript(g).empty())continue;
+    // Old script packages are visible for replacement, but are never launched.
+    if (g.package_format_version!=1) {
+      changed |= RetireLegacyLauncher(config_,g.id);
+      continue;
+    }
     auto before=g.launcher_path;
-    auto expected=config_.launchers_dir/("nest-"+g.id+".sh");
+    const auto expected=config_.launchers_dir/("nest-"+g.id+".gbgame");
     std::string old;
-    if (fs::is_regular_file(expected))old=ReadText(expected);
+    if (fs::is_regular_file(expected)) old=ReadText(expected);
     WriteLauncher(g);
-    if (before!=g.launcher_path||old!=ReadText(g.launcher_path))changed=true;
+    changed |= before!=g.launcher_path || old!=ReadText(g.launcher_path);
   }
-  if (changed)SaveInstalled(games);
+  if (changed) SaveInstalled(games);
   return changed;
 }
 
 std::vector<UpdateInfo> Service::FindUpdates(const std::vector<Entry>& entries) const {
   std::vector<UpdateInfo> out;
-  for (const auto& [id,g]:LoadInstalled())for (const auto& e:entries)if ((e.id==id||e.slug==id)&&IsNewer(e.version,g.installed_version)) {
+  for (const auto& [id,g]:LoadInstalled())for (const auto& e:entries)if ((e.id==id||e.slug==id)&&(g.package_format_version!=1||IsNewer(e.version,g.installed_version))) {
     out.push_back({
       e.slug,g.title,g.installed_version,e.version
     });
@@ -980,42 +908,43 @@ bool Service::IsNewer(const std::string& latest,const std::string& current) {
 }
 
 void Service::Install(const Manifest& m,const ProgressCallback& progress) {
-  if (ParentalLocked()&&m.mature_content)Fail("This game is hidden by parental controls");
+  if (ParentalLocked()&&m.mature_content) Fail("This game is hidden by parental controls");
   const auto slug=m.slug.empty()?m.id:m.slug;
-  if (!ValidSlug(slug)||m.title.empty())Fail("Invalid game metadata");
-  if (m.download.size_bytes==0||m.download.size_bytes>kMaxDownload||m.download.sha256.size()!=64||Lower(m.download.sha256).find_first_not_of("0123456789abcdef")!=std::string::npos)Fail("Package is missing valid size or SHA-256 integrity metadata");
+  if (!ValidSlug(slug)||m.title.empty()) Fail("Invalid game metadata");
+  if (m.download.size_bytes==0||m.download.size_bytes>kMaxDownload||m.download.sha256.size()!=64||Lower(m.download.sha256).find_first_not_of("0123456789abcdef")!=std::string::npos)
+    Fail("Package is missing valid size or SHA-256 integrity metadata");
   auto games=LoadInstalled();
   auto previous=games.find(slug);
-  if (previous==games.end())for (auto it=games.begin();it!=games.end();++it)if (it->first==m.id) {
-    previous=it;
-    break;
-  }
-  const std::string old_id=previous==games.end()?std::string():previous->first;
+  if (previous==games.end()) for (auto it=games.begin();it!=games.end();++it)
+    if (it->first==m.id) { previous=it; break; }
   InstalledGame game;
   game.id=slug;
   game.title=m.title;
   game.installed_version=m.download.version.empty()?m.version:m.download.version;
-  game.install_path=previous==games.end()?config_.games_dir:previous->second.install_path;
-  if (!AllowedInstall(config_,game.install_path))Fail("Unsafe installed game root");
-  ValidateLauncherDestination(config_, slug);
-  fs::create_directories(game.install_path);
-  auto txn=Unique(game.install_path,".nest-txn-");
-  std::vector<fs::path> moved_old,moved_new;
-  bool registered=false;
-  auto launcher=config_.launchers_dir/("nest-"+slug+".sh");
+  game.install_path=config_.games_dir/slug;
+  game.package_format_version=1;
+  NoSymlinks(config_.games_dir,slug);
+  ValidateLauncherDestination(config_,slug);
+  const bool owns_directory=previous!=games.end() && previous->second.package_format_version==1 &&
+      Normal(previous->second.install_path)==Normal(game.install_path);
+  if (fs::exists(game.install_path) && !owns_directory) Fail("Game directory already contains unowned files");
+  fs::create_directories(config_.games_dir);
+  const auto txn=Unique(config_.games_dir,".nest-txn-");
+  const auto launcher=config_.launchers_dir/("nest-"+slug+".gbgame");
   auto icon=launcher;
   icon.replace_extension(".png");
   std::optional<std::string> old_launcher,old_icon;
-  if (fs::is_regular_file(launcher))old_launcher=ReadText(launcher);
-  if (fs::is_regular_file(icon))old_icon=ReadText(icon,8*1024*1024);
+  if (fs::is_regular_file(launcher)) old_launcher=ReadText(launcher);
+  if (fs::is_regular_file(icon)) old_icon=ReadText(icon,8*1024*1024);
+  bool moved_old=false,moved_new=false,registered=false;
   try {
-    auto zip=txn/"package.zip";
+    const auto zip=txn/"package.zip";
     Report(progress,"Downloading");
     Request(config_,JoinUrl(config_.cdn_base_url,m.download.path.empty()?"download/"+slug:m.download.path),"GET",{},
-    zip,progress,m.download.size_bytes);
+            zip,progress,m.download.size_bytes);
     Report(progress,"Verifying");
-    if (fs::file_size(zip)!=m.download.size_bytes)Fail("Package size does not match store metadata");
-    if (FileHash(zip)!=Lower(m.download.sha256))Fail("Package SHA-256 verification failed");
+    if (fs::file_size(zip)!=m.download.size_bytes) Fail("Package size does not match store metadata");
+    if (FileHash(zip)!=Lower(m.download.sha256)) Fail("Package SHA-256 verification failed");
     Report(progress,"Extracting");
     auto fresh=txn/"new";
     fs::create_directory(fresh);
@@ -1031,7 +960,7 @@ void Service::Install(const Manifest& m,const ProgressCallback& progress) {
     while ((status=archive_read_next_header(reader.get(),&entry))==ARCHIVE_OK) {
       const auto* name=archive_entry_pathname(entry);
       if (!name)Fail("Package entry has no filename");
-      auto relative=SafeRelative(name,true);
+      auto relative=SafeRelative(name);
       auto type=archive_entry_filetype(entry);
       if (archive_entry_symlink(entry)||archive_entry_hardlink(entry)||(type!=AE_IFREG&&type!=AE_IFDIR))Fail("Package contains a link or unsupported file type");
       if (relative.empty()) {
@@ -1069,78 +998,43 @@ void Service::Install(const Manifest& m,const ProgressCallback& progress) {
     }
     if (status!=ARCHIVE_EOF)Fail(std::string("Game ZIP is damaged: ")+(archive_error_string(reader.get())?archive_error_string(reader.get()):"unknown error"));
     if (game.installed_files.empty())Fail("Game ZIP is empty");
-    auto staged=game;
-    staged.install_path=fresh;
-    auto script=GameScript(staged);
-    if (script.empty())Fail("Game package has no top-level .sh launcher");
-    auto source=ReadText(script);
-    AtomicText(script,RewriteLauncher(source,game.install_path));
-    fs::permissions(script,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
-    std::set<std::string> old_files;
-    if (previous!=games.end())old_files.insert(previous->second.installed_files.begin(),previous->second.installed_files.end());
-    std::set<std::string> new_files(game.installed_files.begin(),game.installed_files.end());
-    for (const auto& f:new_files) {
-      NoSymlinks(game.install_path,fs::path(f));
-      auto dest=game.install_path/f;
-      if (fs::exists(dest)&&(!old_files.count(f)||!fs::is_regular_file(dest)))Fail("Package would overwrite an existing unowned file: "+f);
-      for (const auto& [other_id,other]:games)if (other_id!=slug&&previous!=games.find(other_id)&&Normal(other.install_path)==Normal(game.install_path)&&std::find(other.installed_files.begin(),other.installed_files.end(),f)!=other.installed_files.end())Fail("Package conflicts with another installed game");
+    const auto package=ReadPackage(fresh);
+    if (package.runtime=="native")
+      fs::permissions(fresh/package.entrypoint,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
+    Report(progress,"Installing",0,1);
+    if (fs::exists(game.install_path)) {
+      fs::rename(game.install_path,txn/"old");
+      moved_old=true;
     }
-    Report(progress,"Installing",0,game.installed_files.size());
-    // Refuse ambiguous legacy ownership before touching either game. New
-    // packages never acquire shared files, but old Python registries could.
-    for (const auto& f:old_files) for (const auto& [other_id,other]:games) if (previous!=games.find(other_id)&&Normal(other.install_path)==Normal(game.install_path)&&std::find(other.installed_files.begin(),other.installed_files.end(),f)!=other.installed_files.end()) Fail("Update cannot safely replace a file shared with another game: "+f);
-    // Back up all previous tracked files, including files removed by the update.
-    fs::create_directory(txn/"old");
-    for (const auto& f:old_files) {
-      auto rel=SafeRelative(f);
-      NoSymlinks(game.install_path,rel);
-      auto original=game.install_path/rel;
-      if (!fs::exists(original))continue;
-      if (!fs::is_regular_file(original))Fail("Previous installed file is no longer a regular file");
-      fs::create_directories((txn/"old"/rel).parent_path());
-      fs::rename(original,txn/"old"/rel);
-      moved_old.push_back(rel);
-    }
-    std::uint64_t done=0;
-    for (const auto& f:game.installed_files) {
-      auto rel=fs::path(f);
-      fs::create_directories((game.install_path/rel).parent_path());
-      fs::rename(fresh/rel,game.install_path/rel);
-      moved_new.push_back(rel);
-      Report(progress,"Installing",++done,game.installed_files.size());
-    }
+    fs::rename(fresh,game.install_path);
+    moved_new=true;
+    Report(progress,"Installing",1,1);
     WriteLauncher(game);
-    if (previous!=games.end()&&previous->first!=slug)games.erase(previous);
+    if (previous!=games.end()&&previous->first!=slug) games.erase(previous);
     games[slug]=game;
     SaveInstalled(games);
     registered=true;
-    std::error_code ec;
-    if (!old_id.empty()&&old_id!=slug) {
-      auto old_path=config_.launchers_dir/("nest-"+old_id+".sh");
-      if (ManagedLauncher(old_path)) {
-        fs::remove(old_path,ec);
-        old_path.replace_extension(".png");
-        fs::remove(old_path,ec);
-      }
-    }
-    fs::remove_all(txn,ec);
+    RetireLegacyLauncher(config_,slug);
+    std::error_code error;
+    fs::remove_all(txn,error);
   } catch (...) {
     if (!registered) {
-      std::error_code ec;
-      for (auto it=moved_new.rbegin();it!=moved_new.rend();++it)fs::remove(game.install_path/ *it,ec);
-      for (auto it=moved_old.rbegin();it!=moved_old.rend();++it) {
-        fs::create_directories((game.install_path/ *it).parent_path(),ec);
-        fs::rename(txn/"old"/ *it,game.install_path/ *it,ec);
+      std::error_code error;
+      if (moved_new) {
+        fs::remove_all(game.install_path,error);
+        if (error) Fail("Could not roll back installation; backup retained at "+txn.string());
+      }
+      if (moved_old) {
+        fs::rename(txn/"old",game.install_path,error);
+        if (error) Fail("Could not restore installation; backup retained at "+txn.string());
       }
       try {
-        if (old_launcher) {
-          AtomicText(launcher,*old_launcher);
-          fs::permissions(launcher,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
-        } else fs::remove(launcher,ec);
-        if (old_icon)AtomicText(icon,*old_icon);
-        else fs::remove(icon,ec);
+        if (old_launcher) AtomicText(launcher,*old_launcher);
+        else fs::remove(launcher,error);
+        if (old_icon) AtomicText(icon,*old_icon);
+        else fs::remove(icon,error);
       } catch (...) {}
-    fs::remove_all(txn,ec);
+      fs::remove_all(txn,error);
     }
     throw;
   }
@@ -1148,75 +1042,52 @@ void Service::Install(const Manifest& m,const ProgressCallback& progress) {
 
 void Service::Uninstall(const std::string& id) {
   auto games=LoadInstalled();
-  auto it=games.find(id);
-  if (it==games.end())Fail("This game is not installed");
-  auto game=it->second;
-  if (!AllowedInstall(config_,game.install_path))Fail("Unsafe installed game root");
-  ValidateLauncherDestination(config_, id);
-  fs::create_directories(game.install_path);
-  auto txn=Unique(game.install_path,".nest-uninstall-");
-  std::vector<fs::path> moved;
-  std::set<std::string> files(game.installed_files.begin(),game.installed_files.end());
-  if (files.empty()) {
-    auto script=GameScript(game);
-    if (!script.empty())files.insert(script.lexically_relative(game.install_path).generic_string());
-    auto folder=game.install_path/id;
-    if (fs::is_directory(folder)&&!fs::is_symlink(folder))for (const auto& e:fs::recursive_directory_iterator(folder))if (e.is_regular_file()&&!e.is_symlink())files.insert(e.path().lexically_relative(game.install_path).generic_string());
+  const auto it=games.find(id);
+  if (it==games.end()) Fail("This game is not installed");
+  const auto game=it->second;
+  if (game.package_format_version!=1) {
+    // Forget obsolete registrations without deleting old payloads or their saves.
+    games.erase(it);
+    SaveInstalled(games);
+    RetireLegacyLauncher(config_,id);
+    return;
   }
-  auto launcher=config_.launchers_dir/("nest-"+id+".sh"),icon=launcher;
+  if (Normal(game.install_path)!=Normal(config_.games_dir/id)) Fail("Unsafe installed game root");
+  NoSymlinks(config_.games_dir,id);
+  ValidateLauncherDestination(config_,id);
+  const auto txn=Unique(config_.games_dir,".nest-uninstall-");
+  const auto launcher=config_.launchers_dir/("nest-"+id+".gbgame");
+  auto icon=launcher;
   icon.replace_extension(".png");
   std::optional<std::string> old_launcher,old_icon;
-  if (fs::is_regular_file(launcher))old_launcher=ReadText(launcher);
-  if (fs::is_regular_file(icon))old_icon=ReadText(icon,8*1024*1024);
+  if (fs::is_regular_file(launcher)) old_launcher=ReadText(launcher);
+  if (fs::is_regular_file(icon)) old_icon=ReadText(icon,8*1024*1024);
+  bool moved=false;
   try {
-    for (const auto& f:files) {
-      auto rel=SafeRelative(f);
-      if (rel.empty())continue;
-      bool shared=false;
-      for (const auto& [other_id,other]:games)if (other_id!=id&&Normal(other.install_path)==Normal(game.install_path)&&std::find(other.installed_files.begin(),other.installed_files.end(),f)!=other.installed_files.end())shared=true;
-      if (shared)continue;
-      NoSymlinks(game.install_path,rel);
-      auto src=game.install_path/rel;
-      if (!fs::exists(src))continue;
-      if (!fs::is_regular_file(src))Fail("Installed path is no longer a regular file");
-      fs::create_directories((txn/rel).parent_path());
-      fs::rename(src,txn/rel);
-      moved.push_back(rel);
+    if (fs::exists(game.install_path)) {
+      fs::rename(game.install_path,txn/"game");
+      moved=true;
     }
-    NoSymlinks(config_.launchers_dir,launcher.filename());
-    NoSymlinks(config_.launchers_dir,icon.filename());
     fs::remove(launcher);
     fs::remove(icon);
     games.erase(it);
     SaveInstalled(games);
   } catch (...) {
-    std::error_code ec;
-    for (auto r=moved.rbegin();r!=moved.rend();++r)fs::rename(txn/ *r,game.install_path/ *r,ec);
+    std::error_code error;
+    if (moved) {
+      fs::rename(txn/"game",game.install_path,error);
+      if (error) Fail("Could not restore removed game; backup retained at "+txn.string());
+    }
     try {
-      if (old_launcher) {
-        AtomicText(launcher,*old_launcher);
-        fs::permissions(launcher,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
-      }
-      if (old_icon)AtomicText(icon,*old_icon);
+      if (old_launcher) AtomicText(launcher,*old_launcher);
+      if (old_icon) AtomicText(icon,*old_icon);
     } catch (...) {}
-    fs::remove_all(txn,ec);
+    fs::remove_all(txn,error);
     throw;
   }
-  std::error_code ec;
-  fs::remove_all(txn,ec);
-  std::set<fs::path> dirs;
-  for (const auto& f:files) {
-    auto p=(game.install_path/SafeRelative(f)).parent_path();
-    while (p!=game.install_path&&Under(p,game.install_path)) {
-      dirs.insert(p);
-      p=p.parent_path();
-    }
-  }
-  std::vector<fs::path> sorted(dirs.begin(),dirs.end());
-  std::sort(sorted.begin(),sorted.end(),[](const auto& a,const auto& b) {
-    return a.native().size()>b.native().size();
-  });
-  for (const auto& d:sorted)fs::remove(d,ec);
+  std::error_code error;
+  fs::remove_all(txn,error);
+  // Saves and logs live outside games_dir and survive removal/reinstallation.
 }
 
 std::map<std::string,int> Service::LoadRatings() const {

@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 
 #include "core/logging.h"
+#include "nest/json.h"
 
 namespace gb::db {
 
@@ -102,25 +103,19 @@ std::string NormalizeTitle(const std::string& filename_stem) {
 }
 
 std::string NestLauncherTitle(const std::filesystem::path& file) {
-  // Native Nest uses a stable slug for its launcher filename. Keep the display
-  // title in a comment so daemon rescans retain the publisher's game title.
   std::ifstream in(file, std::ios::binary);
-  std::string header(4096, '\0');
-  in.read(header.data(), static_cast<std::streamsize>(header.size()));
-  header.resize(static_cast<std::size_t>(in.gcount()));
-  constexpr std::string_view prefix = "# GameBird Nest title: ";
-  std::istringstream lines(header);
-  std::string line;
-  while (std::getline(lines, line)) {
-    if (!line.starts_with(prefix)) continue;
-    auto title = line.substr(prefix.size());
-    if (!title.empty() && title.back() == '\r') title.pop_back();
+  std::string contents(65537, '\0');
+  in.read(contents.data(), static_cast<std::streamsize>(contents.size()));
+  contents.resize(static_cast<std::size_t>(in.gcount()));
+  if (contents.size() > 65536) return {};
+  try {
+    const auto data = gb::nest::detail::Json::Parse(contents);
+    if (data["managed_by"].String() != "gamebird-nest") return {};
+    const auto title = data["title"].String();
     if (title.empty() || title.size() > 240 ||
-        std::any_of(title.begin(), title.end(), [](unsigned char c) { return c < 32 || c == 127; }))
-      return {};
+        std::any_of(title.begin(), title.end(), [](unsigned char c) { return c < 32 || c == 127; })) return {};
     return title;
-  }
-  return {};
+  } catch (const std::exception&) { return {}; }
 }
 
 std::int64_t LastWriteSeconds(const std::filesystem::path& path) {
@@ -454,7 +449,7 @@ bool RunIncrementalScan(Database& db, const ScanConfig& config, ScanStats& stats
           }
 
           std::string title;
-          if (system_id == "apps" && ToLower(file_path.extension().string()) == ".sh")
+          if (system_id == "apps" && ToLower(file_path.extension().string()) == ".gbgame")
             title = NestLauncherTitle(file_path);
           if (title.empty()) title = NormalizeTitle(file_path.stem().string());
           GameRecord game{};

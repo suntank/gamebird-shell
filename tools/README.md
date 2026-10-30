@@ -39,5 +39,8 @@ process (requires Python 3).
 `./build/nest_ui_test /tmp/gamebird-nest-previews` renders the native Nest
 screens from local fixtures and checks browsing, filtering, PIN locking,
 ratings, installation progress, and back navigation without a network request.
-`nest_service_test` and `nest_launch_compat_test` exercise package integrity,
-safe extraction, rollback, legacy migration and shell library integration.
+`nest_service_test` and `nest_package_test` exercise package integrity,
+manifest validation, safe extraction, rollback, direct Python/native launch,
+persistent saves, launch diagnostics, and shell library integration. With
+services enabled, `nest_package_test` runs fixture games through the real
+`gblaunch` helper. See `docs/nest-packages.md` for the download ZIP format.

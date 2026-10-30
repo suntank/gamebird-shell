@@ -1,7 +1,7 @@
 {
   "id": "apps",
   "name": "GAMEBIRD",
-  "rom_extensions": [".sh", ".elf", ".bin"],
+  "rom_extensions": [".gbgame", ".sh", ".elf", ".bin"],
   "launch_type": "exec",
   "launch_template": "{rom_path}",
   "extra_args": ""

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <map>
 #include <vector>
 
 namespace gb::platform {
@@ -14,7 +15,14 @@ struct ProcessResult {
   std::string error;
 };
 
-ProcessResult RunProcessBlocking(const std::vector<std::string>& argv);
+struct ProcessOptions {
+  std::string working_directory;
+  std::string log_path;
+  std::map<std::string, std::string> environment;
+};
+
+ProcessResult RunProcessBlocking(const std::vector<std::string>& argv,
+                                 const ProcessOptions& options = {});
 
 struct ProcessCaptureResult {
   ProcessResult process;

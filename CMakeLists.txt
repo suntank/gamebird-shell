@@ -25,9 +25,13 @@ if(NOT LIBARCHIVE_LIBRARY)
   message(FATAL_ERROR "libarchive is required for native Nest game packages")
 endif()
 
+add_library(gbshell_package STATIC src/nest/package.cpp)
+target_include_directories(gbshell_package PUBLIC src)
+target_compile_options(gbshell_package PRIVATE -Wall -Wextra -Wpedantic)
+
 add_library(gbshell_nest STATIC src/nest/service.cpp)
 target_include_directories(gbshell_nest PUBLIC src)
-target_link_libraries(gbshell_nest PUBLIC PkgConfig::CURL OpenSSL::Crypto ${LIBARCHIVE_LIBRARY})
+target_link_libraries(gbshell_nest PUBLIC gbshell_package PkgConfig::CURL OpenSSL::Crypto ${LIBARCHIVE_LIBRARY})
 target_compile_options(gbshell_nest PRIVATE -Wall -Wextra -Wpedantic)
 
 find_library(SQLITE3_LIBRARY NAMES sqlite3)
@@ -46,7 +50,7 @@ if(BUILD_TESTING)
     src/db/db.cpp
   )
   target_include_directories(launch_config_test PRIVATE src)
-  target_link_libraries(launch_config_test PRIVATE ${SQLITE3_LIBRARY})
+  target_link_libraries(launch_config_test PRIVATE ${SQLITE3_LIBRARY} gbshell_package)
   target_compile_options(launch_config_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME launch_config_test COMMAND launch_config_test)
 
@@ -261,7 +265,7 @@ if(GBSHELL_BUILD_SERVICES)
     src/db/db.cpp
   )
   target_include_directories(gblaunch PRIVATE src)
-  target_link_libraries(gblaunch PRIVATE ${SQLITE3_LIBRARY})
+  target_link_libraries(gblaunch PRIVATE ${SQLITE3_LIBRARY} gbshell_package)
 
   target_compile_options(gblibd PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(gblaunch PRIVATE -Wall -Wextra -Wpedantic)
@@ -276,11 +280,16 @@ if(BUILD_TESTING)
   target_compile_options(nest_service_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME nest_service_test COMMAND nest_service_test)
 
-  add_executable(nest_launch_compat_test tests/nest_launch_compat_test.cpp
+  add_executable(nest_package_test tests/nest_package_test.cpp
     src/platform/proc.cpp ${GBSHELL_DB_SOURCES} src/core/logging.cpp src/core/time.cpp)
-  target_link_libraries(nest_launch_compat_test PRIVATE gbshell_nest ${SQLITE3_LIBRARY})
-  target_compile_options(nest_launch_compat_test PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME nest_launch_compat_test COMMAND nest_launch_compat_test)
+  target_link_libraries(nest_package_test PRIVATE gbshell_nest ${SQLITE3_LIBRARY})
+  target_compile_options(nest_package_test PRIVATE -Wall -Wextra -Wpedantic)
+  if(GBSHELL_BUILD_SERVICES)
+    add_test(NAME nest_package_test COMMAND nest_package_test $<TARGET_FILE:gblaunch>)
+    add_dependencies(nest_package_test gblaunch)
+  else()
+    add_test(NAME nest_package_test COMMAND nest_package_test)
+  endif()
 
   add_executable(nest_ui_test tests/nest_ui_test.cpp
     src/ui/widgets/list.cpp src/ui/widgets/text.cpp
@@ -293,7 +302,7 @@ if(BUILD_TESTING)
     src/core/play_session.cpp src/core/launch_config.cpp src/db/db.cpp
     src/core/logging.cpp src/core/time.cpp)
   target_include_directories(play_session_test PRIVATE src)
-  target_link_libraries(play_session_test PRIVATE ${SQLITE3_LIBRARY})
+  target_link_libraries(play_session_test PRIVATE ${SQLITE3_LIBRARY} gbshell_package)
   target_compile_options(play_session_test PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME play_session_test COMMAND play_session_test)
 

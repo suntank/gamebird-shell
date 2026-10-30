@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -12,7 +13,8 @@
 
 namespace gb::platform {
 
-ProcessResult RunProcessBlocking(const std::vector<std::string>& argv) {
+ProcessResult RunProcessBlocking(const std::vector<std::string>& argv,
+                                 const ProcessOptions& options) {
   ProcessResult result;
 
   if (argv.empty()) {
@@ -27,18 +29,61 @@ ProcessResult RunProcessBlocking(const std::vector<std::string>& argv) {
   }
   child_argv.push_back(nullptr);
 
+  int errors[2];
+  if (pipe2(errors, O_CLOEXEC) < 0) {
+    result.error = std::string("launch pipe failed: ") + std::strerror(errno);
+    return result;
+  }
+  int log = -1;
+  if (!options.log_path.empty()) {
+    log = open(options.log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (log < 0) {
+      result.error = std::string("cannot open game log: ") + std::strerror(errno);
+      close(errors[0]); close(errors[1]);
+      return result;
+    }
+  }
   const pid_t pid = fork();
   if (pid < 0) {
     result.error = std::string("fork failed: ") + std::strerror(errno);
+    close(errors[0]); close(errors[1]);
+    if (log >= 0) close(log);
     return result;
   }
-
   if (pid == 0) {
+    close(errors[0]);
+    const auto fail = [&](const int stage) {
+      const int failure[] = {stage, errno};
+      const auto ignored = write(errors[1], failure, sizeof(failure));
+      (void)ignored;
+      _exit(127);
+    };
+    if (!options.working_directory.empty() && chdir(options.working_directory.c_str()) < 0) fail(1);
+    if (log >= 0) {
+      if (dup2(log, STDOUT_FILENO) < 0 || dup2(log, STDERR_FILENO) < 0) fail(2);
+      close(log);
+    }
+    for (const auto& [key, value] : options.environment)
+      if (setenv(key.c_str(), value.c_str(), 1) < 0) fail(3);
     execvp(child_argv[0], child_argv.data());
-    _exit(127);
+    fail(4);
   }
-
-  result.launched = true;
+  close(errors[1]);
+  if (log >= 0) close(log);
+  int failure[2] = {};
+  ssize_t count;
+  do { count = read(errors[0], failure, sizeof(failure)); } while (count < 0 && errno == EINTR);
+  close(errors[0]);
+  if (count > 0) {
+    const char* stage = failure[0] == 1 ? "cannot enter game directory" :
+                        failure[0] == 2 ? "cannot redirect game log" :
+                        failure[0] == 3 ? "cannot set game environment" : "cannot start executable";
+    result.error = std::string(stage) + ": " + std::strerror(failure[1]);
+  } else if (count < 0) {
+    result.error = "cannot read launch result";
+  } else {
+    result.launched = true;
+  }
 
   int status = 0;
   while (true) {

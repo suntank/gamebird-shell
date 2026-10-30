@@ -355,7 +355,7 @@ struct NestController::Impl {
     const auto* game = InstalledDetail();
     if (!manifest || !game) return false;
     const auto latest = manifest->download.version.empty() ? manifest->version : manifest->download.version;
-    return nest::Service::IsNewer(latest, game->installed_version);
+    return game->package_format_version != 1 || nest::Service::IsNewer(latest, game->installed_version);
   }
   void Install() {
     if (!manifest || (parental_locked && manifest->mature_content)) return;
@@ -375,8 +375,12 @@ struct NestController::Impl {
     }});
   }
   void Launch(const nest::InstalledGame& game) {
+    if (game.package_format_version != 1) {
+      message = "Update this game to a game.json package";
+      return;
+    }
     if (game.launcher_path.empty()) {
-      message = "Reopen Nest to restore this launcher";
+      message = "Reopen Nest to restore this library entry";
       return;
     }
     launch_path = game.launcher_path.string();
