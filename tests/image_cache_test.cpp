@@ -21,7 +21,7 @@ void Expect(const bool condition, const std::string& message) {
   }
 }
 
-bool WritePng(const std::filesystem::path& path) {
+bool WritePng(const std::filesystem::path& path, const bool transparent = false) {
   std::FILE* file = std::fopen(path.c_str(), "wb");
   if (file == nullptr) {
     return false;
@@ -40,6 +40,7 @@ bool WritePng(const std::filesystem::path& path) {
                PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
   png_write_info(png, info);
   png_byte pixels[] = {255, 0, 0, 255, 0, 255, 0, 255};
+  if (transparent) { pixels[3] = 0; pixels[7] = 128; }
   png_bytep row = pixels;
   png_write_row(png, row);
   png_write_end(png, nullptr);
@@ -99,6 +100,25 @@ int main() {
     gb::render::BlitImageFit(surface, *image, gb::render::Rect{10, 10, 20, 20}, 0);
     Expect(surface.Pixels()[15 * 240 + 10] == gb::render::Rgb565(255, 0, 0),
            "cover is aspect-fitted and centered in the destination box");
+  }
+
+  const auto transparent_path = temp / "transparent.png";
+  Expect(WritePng(transparent_path, true), "write transparent PNG fixture");
+  image = cache.LoadPng(transparent_path.string(), error);
+  Expect(image && image->alpha == std::vector<std::uint8_t>({0, 128}),
+         "PNG alpha survives decoding");
+  if (image) {
+    gb::render::Surface240 surface;
+    const auto background = gb::render::Rgb565(0, 0, 255);
+    const auto blended = gb::render::Rgb565(0, 128, 120);
+    gb::render::BlitImageFit(surface, *image, {10, 10, 20, 20}, background);
+    Expect(surface.Pixels()[15 * 240 + 10] == background,
+           "transparent pixels retain the artwork background");
+    Expect(surface.Pixels()[15 * 240 + 20] == blended,
+           "partial alpha blends against the artwork background");
+    gb::render::BlitImageFit(surface, *image, {10, 10, 20, 20}, background, true);
+    Expect(surface.Pixels()[10 * 240 + 10] == blended,
+           "optional trimming fits visible artwork without transparent padding");
   }
 
   // The store cache names every image .png, so signature detection is required.

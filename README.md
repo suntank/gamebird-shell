@@ -291,16 +291,20 @@ The Systems screen is a left/right console carousel. Press `A` to enter its
 cover browser, use up/down to move through games, and use left/right to switch
 consoles without leaving the cover view. The selected game's cover fills the
 upper portion of the display, with the previous/current/next titles below it.
-Optional console artwork uses:
+Console and logo artwork is bundled for the configured GameBird apps, Super
+Nintendo, Nintendo 64, and PlayStation systems. Custom artwork overrides each
+bundled image independently using:
 
 ```text
 data/system-art/<system-id>-icon.png
 data/system-art/<system-id>-logo.png
 ```
 
-Both are aspect-fitted PNGs. If either file is absent, the shell draws a built-in
-console icon or the system name, so console browsing remains fully usable
-offline.
+Both are aspect-fitted PNGs with transparency preserved; transparent padding is
+trimmed when fitting system art. Controller silhouettes appear on a light tile.
+Systems without bundled or custom artwork use a built-in console icon or the
+system name. Nest also uses the bundled GameBird bird. Artwork attribution and
+license terms are in `assets/system-art/SOURCE.md`.
 
 ### Scraping box art and metadata
 

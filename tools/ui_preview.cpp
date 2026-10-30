@@ -3,6 +3,7 @@
 #include <fstream>
 #include "ui/screens/home.h"
 #include "ui/screens/update.h"
+#include "render/assets.h"
 
 int main(int argc, char** argv) {
   const std::filesystem::path out = argc > 1 ? argv[1] : "/tmp/gamebird-ui";
@@ -24,7 +25,19 @@ int main(int argc, char** argv) {
   gb::ui::UIState state;
   state.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Nest);
   DrawHome(s, state, t); save("01-home");
-  DrawSystems(s,t,{{"Super Nintendo",42,"",""},{"PlayStation",18,"",""}},0,""); save("02-systems");
+  std::vector<SystemCarouselItem> systems;
+  for (const auto& [id, name] : std::vector<std::pair<std::string, std::string>>{
+           {"apps", "GAMEBIRD"}, {"snes", "Super Nintendo"},
+           {"n64", "Nintendo 64"}, {"psx", "Sony PlayStation"}}) {
+    systems.push_back({name, 42, gb::render::BundledSystemArt(id + "-icon.png").string(),
+                      gb::render::BundledSystemArt(id + "-logo.png").string()});
+  }
+  DrawSystems(s,t,systems,1,""); save("02-systems");
+  for (int i = 0; i < static_cast<int>(systems.size()); ++i) {
+    DrawSystems(s,t,systems,i,"");
+    const auto filename = "02-system-" + std::to_string(i);
+    save(filename.c_str());
+  }
   DrawGameBrowser(s,t,"Super Nintendo",{"Chrono Trigger","Super Metroid","The Legend of Zelda"},1,"",""); save("03-browser");
   DrawGameList(s,t,"FAVORITES",{"Chrono Trigger","Super Metroid","The Legend of Zelda: A Link to the Past"},2,""); save("04-favorites");
   DrawSettings(s,t,{"Volume: 75%","Brightness: 80%","Theme: Default","Show hidden: OFF","Wi-Fi: Connected","Bluetooth: ON","Save settings"},4,"Settings saved"); save("05-settings");

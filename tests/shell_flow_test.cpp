@@ -57,6 +57,20 @@ int main(int argc, char** argv) {
   lib.db_ready = true;
   lib.settings.show_diagnostics = false;
   LoadSystems(db, lib);
+  lib.system_artwork_dir = (dir / "system-art").string();
+  auto cards = BuildSystemCards(lib);
+  Expect(cards.size() == lib.systems.size(), "bundled art does not add systems");
+  for (std::size_t i = 0; i < lib.systems.size(); ++i) {
+    if (lib.systems[i].id != "snes") continue;
+    Expect(fs::is_regular_file(cards[i].icon_path) && fs::is_regular_file(cards[i].logo_path),
+           "supported system gets bundled console and logo without data artwork");
+    fs::create_directories(lib.system_artwork_dir);
+    const auto custom = fs::path(lib.system_artwork_dir) / "snes-logo.png";
+    fs::copy_file(cards[i].logo_path, custom);
+    cards = BuildSystemCards(lib);
+    Expect(cards[i].logo_path == custom.string() && fs::is_regular_file(cards[i].icon_path),
+           "custom logo takes priority while console keeps its bundled default");
+  }
   const auto snes = std::find_if(lib.systems.begin(), lib.systems.end(), [](const auto& system) { return system.id == "snes"; });
   SelectSystem(db, lib, static_cast<int>(snes - lib.systems.begin()));
   gb::ui::UIState ui;

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "render/image_cache.h"
+#include "render/assets.h"
 #include "ui/widgets/chrome.h"
 #include "ui/widgets/list.h"
 #include "ui/widgets/text.h"
@@ -76,6 +77,13 @@ void Message(render::Surface240& surface, const render::Theme& theme,
 }
 void NestMark(render::Surface240& surface, const render::Theme& theme,
               const int x, const int y, const int scale = 1) {
+  static render::ImageCache images(1);
+  std::string error;
+  if (const auto* bird = images.LoadPng(render::BundledSystemArt("apps-icon.png").string(), error)) {
+    const auto background = surface.Pixels()[y * surface.Width() + x];
+    render::BlitImageFit(surface, *bird, {x, y, 22 * scale, 18 * scale}, background, true);
+    return;
+  }
   // A small bird sitting in its nest, drawn with the shell's pixel palette.
   surface.FillRect(x + 7 * scale, y, 8 * scale, 7 * scale, theme.accent);
   surface.FillRect(x + 5 * scale, y + 5 * scale, 12 * scale, 8 * scale, theme.accent);

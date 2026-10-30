@@ -102,6 +102,7 @@ bool DecodePng(const std::string& path, CachedImage& image, std::string& error) 
   image.width = std::max(1, static_cast<int>(width / scale));
   image.height = std::max(1, static_cast<int>(height / scale));
   image.pixels.resize(static_cast<std::size_t>(image.width) * image.height);
+  image.alpha.resize(image.pixels.size());
   for (int y = 0; y < image.height; ++y) {
     const auto source_y = std::min<png_uint_32>(
         height - 1, static_cast<png_uint_32>(y * scale));
@@ -110,14 +111,13 @@ bool DecodePng(const std::string& path, CachedImage& image, std::string& error) 
       const auto source_x = std::min<png_uint_32>(
           width - 1, static_cast<png_uint_32>(x * scale));
       const png_bytep pixel = row + static_cast<std::size_t>(source_x) * 4;
-      const std::uint16_t r = static_cast<std::uint16_t>(pixel[0] * pixel[3] / 255);
-      const std::uint16_t g = static_cast<std::uint16_t>(pixel[1] * pixel[3] / 255);
-      const std::uint16_t b = static_cast<std::uint16_t>(pixel[2] * pixel[3] / 255);
-      image.pixels[static_cast<std::size_t>(y) * image.width + x] =
-          Rgb565(static_cast<std::uint8_t>(r), static_cast<std::uint8_t>(g),
-                 static_cast<std::uint8_t>(b));
+      const auto index = static_cast<std::size_t>(y) * image.width + x;
+      image.pixels[index] = Rgb565(pixel[0], pixel[1], pixel[2]);
+      image.alpha[index] = pixel[3];
     }
   }
+  if (std::all_of(image.alpha.begin(), image.alpha.end(),
+                  [](const auto alpha) { return alpha == 255; })) image.alpha.clear();
   return true;
 }
 
@@ -269,17 +269,50 @@ void ImageCache::Clear() { entries_.clear(); }
 void BlitImageFit(Surface240& surface,
                   const CachedImage& image,
                   const Rect bounds,
-                  const std::uint16_t background) {
+                  const std::uint16_t background,
+                  const bool trim_transparent) {
   surface.FillRect(bounds.x, bounds.y, bounds.w, bounds.h, background);
   if (image.width <= 0 || image.height <= 0 || image.pixels.empty() || bounds.w <= 0 ||
       bounds.h <= 0) {
     return;
   }
-  const double scale = std::min(static_cast<double>(bounds.w) / image.width,
-                                static_cast<double>(bounds.h) / image.height);
-  const int width = std::max(1, static_cast<int>(image.width * scale));
-  const int height = std::max(1, static_cast<int>(image.height * scale));
-  surface.BlitScaled(image.pixels.data(), image.width, image.height,
+  Rect source{0, 0, image.width, image.height};
+  std::vector<std::uint16_t> composited;
+  const auto* pixels = image.pixels.data();
+  if (!image.alpha.empty()) {
+    if (trim_transparent) {
+      int left = image.width, top = image.height, right = -1, bottom = -1;
+      for (int y = 0; y < image.height; ++y) {
+        for (int x = 0; x < image.width; ++x) {
+          if (image.alpha[static_cast<std::size_t>(y) * image.width + x] == 0) continue;
+          left = std::min(left, x); top = std::min(top, y);
+          right = std::max(right, x); bottom = std::max(bottom, y);
+        }
+      }
+      if (right < left) return;
+      source = {left, top, right - left + 1, bottom - top + 1};
+    }
+    composited.resize(static_cast<std::size_t>(source.w) * source.h);
+    for (int y = 0; y < source.h; ++y) {
+      for (int x = 0; x < source.w; ++x) {
+        const auto index = static_cast<std::size_t>(y + source.y) * image.width + x + source.x;
+        const auto pixel = image.pixels[index];
+        const int alpha = image.alpha[index];
+        const auto blend = [&](const int shift, const int mask) {
+          return ((((pixel >> shift) & mask) * alpha +
+                   ((background >> shift) & mask) * (255 - alpha) + 127) / 255) << shift;
+        };
+        composited[static_cast<std::size_t>(y) * source.w + x] =
+            static_cast<std::uint16_t>(blend(11, 31) | blend(5, 63) | blend(0, 31));
+      }
+    }
+    pixels = composited.data();
+  }
+  const double scale = std::min(static_cast<double>(bounds.w) / source.w,
+                                static_cast<double>(bounds.h) / source.h);
+  const int width = std::max(1, static_cast<int>(source.w * scale));
+  const int height = std::max(1, static_cast<int>(source.h * scale));
+  surface.BlitScaled(pixels, source.w, source.h,
                      bounds.x + (bounds.w - width) / 2,
                      bounds.y + (bounds.h - height) / 2, width, height);
 }

@@ -14,6 +14,8 @@ struct CachedImage {
   int width = 0;
   int height = 0;
   std::vector<std::uint16_t> pixels;
+  // Empty for opaque images; PNG transparency is composited at draw time.
+  std::vector<std::uint8_t> alpha;
 };
 
 class ImageCache {
@@ -40,6 +42,7 @@ class ImageCache {
 void BlitImageFit(Surface240& surface,
                   const CachedImage& image,
                   Rect bounds,
-                  std::uint16_t background);
+                  std::uint16_t background,
+                  bool trim_transparent = false);
 
 }  // namespace gb::render

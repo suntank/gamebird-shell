@@ -32,6 +32,7 @@
 #include "platform/platform_sdl.h"
 #include "platform/proc.h"
 #include "render/surface_240.h"
+#include "render/assets.h"
 #include "render/theme.h"
 #include "scrape/jobs.h"
 #include "ui/screens/home.h"
@@ -1240,11 +1241,18 @@ std::vector<gb::ui::screens::SystemCarouselItem> BuildSystemCards(
 
   for (const auto& sys : lib.systems) {
     const auto art_dir = std::filesystem::path(lib.system_artwork_dir);
+    const auto artwork = [&](const std::string& suffix) {
+      const auto filename = sys.id + suffix;
+      const auto custom = art_dir / filename;
+      std::error_code error;
+      return (std::filesystem::is_regular_file(custom, error)
+                  ? custom : gb::render::BundledSystemArt(filename)).string();
+    };
     out.push_back(gb::ui::screens::SystemCarouselItem{
         .name = sys.name,
         .game_count = sys.game_count,
-        .icon_path = (art_dir / (sys.id + "-icon.png")).string(),
-        .logo_path = (art_dir / (sys.id + "-logo.png")).string(),
+        .icon_path = artwork("-icon.png"),
+        .logo_path = artwork("-logo.png"),
     });
   }
 
