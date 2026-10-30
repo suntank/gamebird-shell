@@ -4,6 +4,7 @@
 #undef main
 #include <iostream>
 #include <thread>
+#include "render/image_cache.h"
 #include <unistd.h>
 
 namespace {
@@ -285,6 +286,13 @@ int main(int argc, char** argv) {
   std::ofstream(nest / "installed_games.json") << "{\"games\":[{\"id\":\"test-game\",\"title\":\"Test Game!\","
       << "\"installed_version\":\"1.0.0\",\"package_format_version\":1,\"install_path\":\"" << (nest / "games/test-game").string()
       << "\",\"installed_files\":[\"game.json\",\"main.py\"]}]}";
+  fs::create_directories(nest / "cache");
+  std::ofstream(nest / "cache/catalog.json") << R"({"games":[{"id":"test-game","slug":"test-game","title":"Test Game!","icon_url":"store-cover.png"}]})";
+  fs::copy_file(gb::render::BundledSystemArt("apps-icon.png"),dir / "store-cover.png");
+  {
+    gb::nest::Service preload(NestConfig(args));
+    preload.CacheImage("store-cover.png");
+  }
   ui.screen = Screen::Home;
   ui.home_selected = gb::ui::HomeIndex(gb::ui::HomeItem::Nest);
   SavePreview(previews, "08-nest-start-menu", ui, lib);
@@ -299,6 +307,20 @@ int main(int argc, char** argv) {
   std::vector<gb::db::GameSummary> nest_games;
   db.ListGamesBySystem("apps", false, nest_games);
   Expect(nest_games.size() == 1 && nest_games.front().title == "Test Game!", "Nest launcher enters shell catalog with publisher title");
+  gb::db::GameDetails nest_details;
+  Expect(!nest_games.empty() && db.GetGameDetails(nest_games.front().id,nest_details) &&
+      nest_details.box_art_path == (apps / "nest-test-game.png").string(),
+      "opening Nest repairs legacy store-only artwork and registers it in the GAMEBIRD library");
+  gb::render::ImageCache art;
+  std::string artwork_error;
+  Expect(art.LoadImage(nest_details.box_art_path,artwork_error) != nullptr,
+      "registered Nest store cover is usable by the library renderer");
+  lib.current_system_id = "apps";
+  lib.game_list_view = GameListView::System;
+  lib.details.box_art_path.clear();
+  RefreshNestLibrary(db,lib,args);
+  Expect(lib.details.box_art_path == nest_details.box_art_path,
+      "Nest library refresh replaces the selected game's stale NO ART details");
   SavePreview(previews, "09-integrated-nest", ui, lib);
   press(Button::Down); press(Button::A);  // Installed games.
   for (int i = 0; lib.nest && lib.nest->Busy() && i < 2000; ++i) {

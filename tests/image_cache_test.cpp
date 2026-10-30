@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -160,6 +161,18 @@ int main() {
   std::ofstream(unsupported) << "not an image";
   Expect(cache.LoadImage(unsupported.string(), error) == nullptr && !error.empty(),
          "unsupported artwork has a graceful fallback");
+
+  const auto repaired = temp / "repaired.png";
+  Expect(cache.LoadImage(repaired.string(), error) == nullptr, "cache the missing artwork state");
+  Expect(WritePng(repaired), "create artwork after a missing-art render");
+  image = cache.LoadImage(repaired.string(), error);
+  Expect(image && error.empty() && image->width == 2, "new artwork replaces a cached NO ART result");
+  const auto previous_time = std::filesystem::last_write_time(repaired);
+  std::filesystem::copy_file(jpeg_path, repaired, std::filesystem::copy_options::overwrite_existing);
+  std::filesystem::last_write_time(repaired, previous_time + std::chrono::seconds(1));
+  image = cache.LoadImage(repaired.string(), error);
+  Expect(image && image->width == 3 && image->height == 2,
+         "replacing an existing cover refreshes cached pixels at the same library path");
 
   std::error_code ec;
   std::filesystem::remove_all(temp, ec);

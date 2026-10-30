@@ -3438,6 +3438,7 @@ void RefreshNestLibrary(gb::db::Database& db, LibraryState& lib, const Args& arg
   }
   LoadSystems(db, lib);
   ReloadGameList(db, lib);
+  if (lib.game_list_view == GameListView::System) RefreshSelectedGameDetails(db, lib);
 }
 
 void PollNest(gb::db::Database& db, LibraryState& lib, gb::ui::UIState& state, const Args& args) {
@@ -5349,7 +5350,10 @@ int RunUiLoop(const std::function<bool(gb::platform::InputFrame&, int)>& poll_in
       if (continue_before != state.continue_title) state.needs_redraw = true;
       LoadSystems(db, lib);
       if (state.screen == gb::ui::Screen::GameList) {
+        const auto previous_art = lib.details.box_art_path;
         ReloadGameList(db, lib);
+        if (lib.game_list_view == GameListView::System) RefreshSelectedGameDetails(db, lib);
+        if (previous_art != lib.details.box_art_path) state.needs_redraw = true;
       }
       if (LibraryUiSignature(lib) != before) {
         state.needs_redraw = true;

@@ -285,7 +285,10 @@ struct NestController::Impl {
     if (url.empty() || image_paths.contains(url) || (pending && pending->kind != Work::Image)) return;
     Start({Work::Image, view, [url](nest::Service& api, const auto&) {
       Result result; result.image_url = url;
-      try { result.image_path = api.CacheImage(url).string(); } catch (...) {}
+      try {
+        result.image_path = api.CacheImage(url).string();
+        result.library_changed = api.RefreshLaunchers();
+      } catch (...) {}
       return result;
     }});
   }

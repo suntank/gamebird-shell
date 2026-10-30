@@ -4,6 +4,7 @@
 #include <array>
 #include <csetjmp>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -236,7 +237,17 @@ const CachedImage* ImageCache::LoadImage(const std::string& path, std::string& e
     error = "no artwork path";
     return nullptr;
   }
-  if (auto it = entries_.find(path); it != entries_.end()) {
+  // An install/repair can create or replace artwork at an unchanged path.
+  // Cache by file version so missing covers and old images do not stick around.
+  std::error_code file_error;
+  const auto modified = std::filesystem::last_write_time(path, file_error);
+  std::string key = path + '\0';
+  if (file_error) key += "missing";
+  else {
+    key += std::to_string(modified.time_since_epoch().count()) + ":";
+    key += std::to_string(std::filesystem::file_size(path, file_error));
+  }
+  if (auto it = entries_.find(key); it != entries_.end()) {
     it->second.last_used = ++use_counter_;
     error = it->second.error;
     return it->second.image.pixels.empty() ? nullptr : &it->second.image;
@@ -259,7 +270,7 @@ const CachedImage* ImageCache::LoadImage(const std::string& path, std::string& e
     entry.image = {};
     error = entry.error;
   }
-  const auto [it, inserted] = entries_.emplace(path, std::move(entry));
+  const auto [it, inserted] = entries_.emplace(key, std::move(entry));
   (void)inserted;
   return it->second.image.pixels.empty() ? nullptr : &it->second.image;
 }

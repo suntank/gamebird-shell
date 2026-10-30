@@ -36,6 +36,11 @@ std::string Lower(std::string s) {
   return s;
 }
 
+bool IsPackageIcon(const fs::path& path) {
+  const auto name=path.filename().string();
+  return name=="icon.png" || name.ends_with("-icon.png") || name.ends_with("_icon.png");
+}
+
 fs::path Home() {
   const char* h=std::getenv("HOME");
   return h?fs::path(h):fs::path("/home/pi");
@@ -751,6 +756,7 @@ std::map<std::string,InstalledGame> Service::LoadInstalled() const {
     g.title=v["title"].String();
     g.installed_version=v["installed_version"].String();
     g.package_format_version=v["package_format_version"].Number()==1 ? 1 : 0;
+    g.icon_url=v["icon_url"].String();
     auto path=v["install_path"].String();
     if (!ValidSlug(g.id)||g.title.empty()||path.empty())continue;
     g.install_path=Normal(path);
@@ -788,6 +794,7 @@ void Service::SaveInstalled(const std::map<std::string,InstalledGame>& games) co
         "installed_version",g.installed_version
       },
       {"package_format_version",g.package_format_version},
+      {"icon_url",g.icon_url},
       {
         "install_path",g.install_path.string()
       },
@@ -813,11 +820,17 @@ fs::path Service::LaunchPath(const InstalledGame& g) const {
   return ManagedLauncher(path) ? path : fs::path{};
 }
 
-void Service::WriteLauncher(InstalledGame& g) const {
+bool Service::WriteLauncher(InstalledGame& g) const {
   if (g.package_format_version != 1 || !ValidSlug(g.id) ||
       Normal(g.install_path) != Normal(config_.games_dir/g.id)) Fail("Unsafe installed game root");
   NoSymlinks(config_.games_dir, g.id);
   ValidateLauncherDestination(config_, g.id);
+  if (g.icon_url.empty()) {
+    for (const auto& entry:CachedCatalog()) if (entry.slug==g.id || entry.id==g.id) {
+      g.icon_url=entry.icon_url;
+      break;
+    }
+  }
   ReadPackage(g.install_path);
   fs::create_directories(config_.launchers_dir);
   g.launcher_path=config_.launchers_dir/("nest-"+g.id+".gbgame");
@@ -827,23 +840,44 @@ void Service::WriteLauncher(InstalledGame& g) const {
     {"save_dir",(config_.data_dir/"saves"/g.id).string()},
     {"log_path",(config_.data_dir/"logs"/(g.id+".log")).string()}
   }).Dump()+"\n";
-  if (!fs::is_regular_file(g.launcher_path) || ReadText(g.launcher_path)!=text)
+  bool changed=false;
+  if (!fs::is_regular_file(g.launcher_path) || ReadText(g.launcher_path)!=text) {
     AtomicText(g.launcher_path,text);
+    changed=true;
+  }
   auto icon=g.launcher_path;
   icon.replace_extension(".png");
+  const auto copy_icon=[&](const fs::path& source) {
+    const auto bytes=ReadText(source,8*1024*1024);
+    if (!fs::is_regular_file(icon) || ReadText(icon,8*1024*1024)!=bytes) {
+      AtomicText(icon,bytes);
+      changed=true;
+    }
+  };
   for (const auto& file:g.installed_files) {
     const auto p=fs::path(file);
-    if (p.filename()=="icon.png" || p.filename().string().ends_with("-icon.png") ||
-        p.filename().string().ends_with("_icon.png")) {
+    if (IsPackageIcon(p)) {
       NoSymlinks(g.install_path,p);
       if (fs::is_regular_file(g.install_path/p)) {
-        AtomicText(icon,ReadText(g.install_path/p,8*1024*1024));
-        return;
+        copy_icon(g.install_path/p);
+        return changed;
       }
     }
   }
+  // Store artwork lives outside the downloadable ZIP. Keep a library-side copy
+  // so games without icon.png retain their cover offline and across restarts.
+  if (!g.icon_url.empty()) {
+    const auto cached=config_.data_dir/"cache/images"/(Hash(g.icon_url)+".png");
+    if (fs::is_regular_file(cached)) {
+      copy_icon(cached);
+      return changed;
+    }
+    // A failed optional artwork refresh must not discard an existing cover.
+    if (fs::is_regular_file(icon)) return changed;
+  }
   std::error_code error;
-  fs::remove(icon,error);
+  changed |= fs::remove(icon,error);
+  return changed;
 }
 
 bool Service::RefreshLaunchers() {
@@ -857,10 +891,12 @@ bool Service::RefreshLaunchers() {
       continue;
     }
     auto before=g.launcher_path;
+    const auto before_icon_url=g.icon_url;
     const auto expected=config_.launchers_dir/("nest-"+g.id+".gbgame");
     std::string old;
     if (fs::is_regular_file(expected)) old=ReadText(expected);
-    WriteLauncher(g);
+    changed |= WriteLauncher(g);
+    changed |= before_icon_url!=g.icon_url;
     changed |= before!=g.launcher_path || old!=ReadText(g.launcher_path);
   }
   if (changed) SaveInstalled(games);
@@ -923,6 +959,13 @@ void Service::Install(const Manifest& m,const ProgressCallback& progress) {
   game.installed_version=m.download.version.empty()?m.version:m.download.version;
   game.install_path=config_.games_dir/slug;
   game.package_format_version=1;
+  game.icon_url=m.icon_url;
+  if (game.icon_url.empty()) {
+    for (const auto& entry:CachedCatalog()) if (entry.slug==slug || entry.id==m.id) {
+      game.icon_url=entry.icon_url;
+      break;
+    }
+  }
   NoSymlinks(config_.games_dir,slug);
   ValidateLauncherDestination(config_,slug);
   const bool owns_directory=previous!=games.end() && previous->second.package_format_version==1 &&
@@ -1001,6 +1044,13 @@ void Service::Install(const Manifest& m,const ProgressCallback& progress) {
     const auto package=ReadPackage(fresh);
     if (package.runtime=="native")
       fs::permissions(fresh/package.entrypoint,fs::perms::owner_exec|fs::perms::group_exec|fs::perms::others_exec,fs::perm_options::add);
+    if (!game.icon_url.empty() && std::none_of(game.installed_files.begin(),game.installed_files.end(),
+        [](const auto& file) { return IsPackageIcon(file); })) {
+      Report(progress,"Artwork");
+      try { CacheImage(game.icon_url); } catch (const std::exception&) {
+        // Artwork is optional; a CDN failure must not reject a valid game.
+      }
+    }
     Report(progress,"Installing",0,1);
     if (fs::exists(game.install_path)) {
       fs::rename(game.install_path,txn/"old");

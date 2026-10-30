@@ -59,6 +59,7 @@ struct InstalledGame {
   fs::path install_path, launcher_path;
   std::vector<std::string> installed_files;
   int package_format_version = 0;
+  std::string icon_url;
 };
 struct UpdateInfo { std::string game_id, title, installed_version, latest_version; };
 struct Progress { std::string stage; std::uint64_t completed = 0, total = 0; };
@@ -100,6 +101,6 @@ class Service {
   bool unlocked_ = false;
   void SaveInstalled(const std::map<std::string, InstalledGame>& games) const;
   void SaveRatings(const std::map<std::string, int>& ratings) const;
-  void WriteLauncher(InstalledGame& game) const;
+  bool WriteLauncher(InstalledGame& game) const;
 };
 }  // namespace gb::nest

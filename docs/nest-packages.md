@@ -3,6 +3,12 @@
 Nest games are self-contained ZIPs with `game.json` at the ZIP root. Shell
 launchers, RetroPie paths, and an outer `game/` wrapper are no longer used.
 
+The GAMEBIRD library uses a packaged `icon.png` (or `*-icon.png`/`*_icon.png`)
+when available. Otherwise Nest downloads the store's `icon_url` and keeps a
+local library copy, so the cover remains available offline. Missing store
+artwork does not prevent game installation. Existing iconless installations
+are repaired from cached store artwork when Nest opens; no reinstall is needed.
+
 ## Python package
 
 ```text

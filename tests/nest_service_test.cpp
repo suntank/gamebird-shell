@@ -274,6 +274,67 @@ namespace {
     fs::remove(record);
   }
 
+  void ArtworkTests(gb::nest::Config c) {
+    c.data_dir=c.data_dir.parent_path()/"art-store";
+    c.games_dir=c.games_dir.parent_path()/"art-games";
+    c.launchers_dir=c.launchers_dir.parent_path()/"art-apps";
+    gb::nest::Service service(c);
+    const auto cdn=fs::path(c.cdn_base_url.substr(7));
+    const std::string manifest=R"({"format_version":1,"runtime":"python3","entrypoint":"main.py"})";
+    auto game=Package(c,"1.0",{{"game.json",manifest},{"main.py","pass"}});
+    game.icon_url="cover.png";
+    Write(cdn/"cover.png","store cover");
+    service.Install(game);
+    const auto icon=c.launchers_dir/"nest-fixture.png";
+    Check(Read(icon)=="store cover" && !fs::exists(c.games_dir/"fixture/icon.png"),
+          "iconless ZIP uses store artwork outside the game payload");
+    Check(service.LoadInstalled().at("fixture").icon_url=="cover.png",
+          "installed metadata preserves store artwork URL");
+    Check(!service.RefreshLaunchers(),"unchanged artwork refresh is idle");
+    const auto cached=service.CacheImage("cover.png");
+    fs::remove(cached); fs::remove(cdn/"cover.png");
+    Check(!service.RefreshLaunchers() && Read(icon)=="store cover",
+          "offline refresh preserves library artwork after cache eviction");
+    Write(cdn/"cover.png","refreshed cover");
+    service.CacheImage("cover.png");
+    Check(service.RefreshLaunchers() && Read(icon)=="refreshed cover",
+          "artwork-only repair reports a library change");
+    Check(!service.RefreshLaunchers(),"repair does not continually rewrite identical artwork");
+
+    game=Package(c,"2.0",{{"game.json",manifest},{"main.py","pass"},{"icon.png","package cover"}});
+    game.icon_url="missing-store-cover.png";
+    service.Install(game);
+    Check(Read(icon)=="package cover","packaged icon takes priority without requiring the CDN");
+    game=Package(c,"3.0",{{"game.json",manifest},{"main.py","pass"}});
+    game.icon_url="new-cover.png";
+    Write(cdn/"new-cover.png","new store cover");
+    service.Install(game);
+    Check(Read(icon)=="new store cover","game update replaces removed package art with its new store icon");
+
+    game=Package(c,"4.0",{{"game.json",manifest},{"main.py","pass"}});
+    game.icon_url="unavailable.png";
+    service.Install(game);
+    Check(service.LoadInstalled().at("fixture").installed_version=="4.0" &&
+          Read(icon)=="new store cover","optional artwork failure does not reject a valid game or discard its cover");
+
+    // Older installed registries did not save icon URLs; repair from the
+    // offline catalog without reinstalling the package or fetching the network.
+    Write(c.data_dir/"cache/catalog.json",R"({"games":[{"id":"fixture","slug":"fixture","title":"Fixture","icon_url":"cover.png"}]})");
+    Write(c.data_dir/"installed_games.json",Json(Json::Object{{"games",Json::Array{
+      Json::Object{{"id","fixture"},{"title","Fixture"},{"installed_version","4.0"},
+        {"package_format_version",1},{"install_path",(c.games_dir/"fixture").string()},
+        {"launcher_path",(c.launchers_dir/"nest-fixture.gbgame").string()},
+        {"installed_files",Json::Array{"game.json","main.py"}}}
+    }}}).Dump());
+    fs::remove(icon);
+    Check(service.RefreshLaunchers() && Read(icon)=="refreshed cover",
+          "legacy iconless install is repaired from cached catalog artwork");
+    fs::remove(c.data_dir/"cache/catalog.json");
+    Check(service.LoadInstalled().at("fixture").icon_url=="cover.png" && !service.RefreshLaunchers(),
+          "repaired URL survives removal of catalog metadata");
+    service.Uninstall("fixture");
+    Check(!fs::exists(icon),"uninstall removes its library artwork");
+  }
 }
 int main(){
   auto root=fs::temp_directory_path()/("nest-service-test-"+std::to_string(getpid()));
@@ -295,6 +356,7 @@ int main(){
     gb::nest::Service service(c);
     CatalogTests(service,c);
     InstallTests(service,c);
+    ArtworkTests(c);
     Check(gb::nest::Service::IsNewer("v1.10","1.2")&&!gb::nest::Service::IsNewer("1.0.0","1"),"version comparison pads missing components");
   } catch(const std::exception& e){
     std::cerr<<"FAIL: unexpected exception: "<<e.what()<<'\n';
