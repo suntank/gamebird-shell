@@ -422,6 +422,8 @@ active after reboot. Progress records include the boot ID; the screen discards
 busy states from a previous boot instead of remaining stuck on `REBOOTING`.
 To repair an older console showing that stale status, run the installer above
 and then `sudo systemctl start gamebird-update-check.service` to refresh it.
+Protected-root installs temporarily use the live DNS resolver file so package
+downloads follow the current network instead of stale image settings.
 
 The update screen shows **Running** (the commit embedded in the open shell),
 **Installed** (the verified binaries on disk), and **Latest** (the commit offered

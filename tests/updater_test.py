@@ -239,6 +239,31 @@ class UpdaterTest(unittest.TestCase):
         self.assertEqual(self.status()["phase"], "ERROR")
         self.assertFalse(self.commands.exists())
 
+    def test_protected_install_uses_live_dns(self):
+        self.prepare_install()
+        resolver = self.root / "lower/etc/resolv.conf"
+        resolver.parent.mkdir(parents=True)
+        resolver.write_text("nameserver 127.0.0.53\n")
+        self.mock("mount", f'echo "mount $*" >> "{self.commands}"')
+        self.mock("overlayroot-chroot", f'echo "chroot $*" >> "{self.commands}"')
+        result = self.run_updater("install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.commands.read_text()
+        self.assertIn(f"mount --bind /etc/resolv.conf {resolver}", calls)
+        self.assertLess(calls.index("mount --bind /etc/resolv.conf"), calls.index("chroot "))
+        self.assertEqual(resolver.read_text(), "nameserver 127.0.0.53\n")
+
+    def test_failed_dns_bind_stops_before_chroot_or_reboot(self):
+        self.prepare_install()
+        resolver = self.root / "lower/etc/resolv.conf"
+        resolver.parent.mkdir(parents=True)
+        resolver.write_text("nameserver 127.0.0.53\n")
+        self.mock("mount", '[[ "$*" == *"--bind /etc/resolv.conf"* ]] && exit 47; exit 0')
+        result = self.run_updater("install")
+        self.assertEqual(result.returncode, 47, result.stderr)
+        self.assertEqual(self.status()["phase"], "ERROR")
+        self.assertFalse(self.commands.exists())
+
     def test_failed_reboot_is_reported(self):
         self.prepare_install()
         self.mock("systemctl", '[[ "$1" == reboot ]] && exit 45; exit 0')

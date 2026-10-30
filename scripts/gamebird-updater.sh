@@ -239,6 +239,7 @@ inner_install() {
 }
 
 cleanup_mounts() {
+  mountpoint -q "$lower_root/etc/resolv.conf" && umount "$lower_root/etc/resolv.conf" || true
   mountpoint -q "$lower_root/data" && umount "$lower_root/data" || true
   mountpoint -q "$lower_root/dev" && umount -l "$lower_root/dev" || true
   mountpoint -q "$lower_root/boot/firmware" && \
@@ -304,6 +305,13 @@ install_updates() {
   mount --rbind /dev "$lower_root/dev"
   mount --make-rslave "$lower_root/dev"
   mount --bind /data "$lower_root/data"
+  # NetworkManager updates the live overlay's resolver file. The protected
+  # root can retain obsolete DNS servers, so give this install the live file
+  # without persisting a network-specific resolver configuration. /run-based
+  # symlinks are handled by overlayroot-chroot's existing /run bind instead.
+  if [[ -f "$lower_root/etc/resolv.conf" && ! -L "$lower_root/etc/resolv.conf" ]]; then
+    mount --bind /etc/resolv.conf "$lower_root/etc/resolv.conf"
+  fi
 
   # Use the downloaded updater for its own installation, including repairs to
   # old failure handling. Do not delegate back to a stale protected-root copy.
