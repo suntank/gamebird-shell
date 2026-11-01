@@ -28,13 +28,18 @@ clean_value() {
 }
 
 # A source checkout or a marker on /data does not identify the installed
-# binaries. Accept a commit only when all four payload hashes still match.
+# binaries. Accept a commit only when the installed payload hashes still match.
 payload_commit() {
-  local build=$1 commit
+  local build=$1 root=${2:-/} commit
   [[ -f "$build/shell-commit" && -f "$build/shell-payload.sha256" ]] || return 1
   commit=$(cat "$build/shell-commit")
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
   (cd "$build" && sha256sum --check --status shell-payload.sha256) || return 1
+  # Older payloads predate the splash. New receipts also bind the persistent
+  # boot files to this build, including when reading the protected lower root.
+  if [[ -f "$build/boot-splash.sha256" ]]; then
+    (cd "$root" && sha256sum --check --status "$build/boot-splash.sha256") || return 1
+  fi
   printf '%s' "$commit"
 }
 
@@ -164,7 +169,7 @@ install_shell_payload() {
   rm -rf "$build_dir"
   cmake -S "$source_dir" -B "$build_dir" -DBUILD_TESTING=OFF \
     -DGBSHELL_BUILD_SERVICES=ON -DGBSHELL_BUILD_COMMIT="$remote_commit" >>"$log_file" 2>&1
-  cmake --build "$build_dir" --target gbshell gblibd gblaunch gbhud -j1 \
+  cmake --build "$build_dir" --target gbshell gblibd gblaunch gbhud gbsplash -j1 \
     >>"$log_file" 2>&1
   [[ "$("$build_dir/gbshell" --version)" == "GameBird Shell $remote_commit" ]]
 
@@ -185,7 +190,8 @@ install_shell_payload() {
   install -m 0755 "$build_dir/gblibd" "$target/build/gblibd"
   install -m 0755 "$build_dir/gblaunch" "$target/build/gblaunch"
   install -m 0755 "$build_dir/gbhud" "$target/build/gbhud"
-  for binary in gbshell gblibd gblaunch gbhud; do
+  install -m 0755 "$build_dir/gbsplash" "$target/build/gbsplash"
+  for binary in gbshell gblibd gblaunch gbhud gbsplash; do
     cmp "$build_dir/$binary" "$target/build/$binary"
   done
   chown -R gamebird:gamebird "$target" /data/gamebird-shell/config
@@ -194,6 +200,8 @@ install_shell_payload() {
     /usr/local/lib/gamebird/gamebird-updater
   install -D -m 0755 "$source_dir/scripts/gbshell-start.sh" \
     /usr/local/lib/gamebird/gbshell-start.sh
+  install -D -m 0755 "$source_dir/scripts/tv-mode-manager.sh" \
+    /usr/local/lib/gamebird/tv-mode-manager.sh
   install -D -m 0440 "$source_dir/packaging/sudoers/gamebird-update" \
     /etc/sudoers.d/gamebird-update
   for unit in "$source_dir"/packaging/systemd/*.service \
@@ -201,6 +209,14 @@ install_shell_payload() {
     [[ -f "$unit" ]] || continue
     install -D -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
   done
+
+  write_status "INSTALLING BOOT SPLASH" 92 0 1 1 \
+    "Preparing the early Game Bird screen" "$remote_commit"
+  # This phase already runs in the protected root with writable firmware.
+  # The installer verifies the initramfs before enabling its boot settings.
+  bash "$source_dir/scripts/install-boot-splash.sh" --inner --build-dir "$build_dir" \
+    >>"$log_file" 2>&1
+  install -m 0644 /etc/gamebird/boot-splash.sha256 "$target/build/boot-splash.sha256"
 }
 
 inner_install() {
@@ -240,7 +256,8 @@ inner_install() {
     # Bind the identity to the same receipt as the binaries. A power loss
     # between these renames invalidates the old receipt instead of mislabelling
     # new binaries with the previous commit.
-    (cd "$shell_dir/build" && sha256sum shell-commit gbshell gblibd gblaunch gbhud >shell-payload.sha256.tmp)
+    (cd "$shell_dir/build" && sha256sum shell-commit gbshell gblibd gblaunch gbhud \
+      gbsplash boot-splash.sha256 ../assets/boot/splash.rgb565 >shell-payload.sha256.tmp)
     mv -f "$shell_dir/build/shell-payload.sha256.tmp" "$shell_dir/build/shell-payload.sha256"
   fi
 }
@@ -268,7 +285,7 @@ install_updates() {
         $(sed -n 's/^boot_id=//p' "$pending_install") == "$boot_id" ]]; then
     local expected verified
     expected=$(sed -n 's/^commit=//p' "$pending_install")
-    verified=$(payload_commit "$lower_root$shell_dir/build")
+    verified=$(payload_commit "$lower_root$shell_dir/build" "$lower_root")
     [[ "$expected" == "$verified" ]]
     installed_commit=$verified
     request_reboot "$expected"
@@ -326,12 +343,32 @@ install_updates() {
   if (( shell_update == 1 )); then
     inner_updater="$source_dir/scripts/gamebird-updater.sh"
   fi
-  /usr/sbin/overlayroot-chroot /bin/bash "$inner_updater" \
-    inner "$os_count" "$shell_update" "$remote_commit" "$source_dir"
+  # Some overlayroot-chroot versions return their cleanup status instead of
+  # the command's status. Carry the actual result through the shared /data
+  # mount; never treat a successful wrapper exit as proof of an installation.
+  local inner_result="$work_dir/inner-install-result" chroot_rc=0 inner_rc
+  rm -f "$inner_result"
+  /usr/sbin/overlayroot-chroot /bin/bash -c '
+    result_file=$1
+    shift
+    /bin/bash "$@"
+    result=$?
+    printf "%s\n" "$result" > "$result_file"
+    exit "$result"
+  ' gamebird-inner "$inner_result" "$inner_updater" \
+    inner "$os_count" "$shell_update" "$remote_commit" "$source_dir" || chroot_rc=$?
+  (( chroot_rc == 0 )) || return "$chroot_rc"
+  [[ -f "$inner_result" ]] || {
+    echo "Protected installer did not report its result" >>"$log_file"
+    return 1
+  }
+  read -r inner_rc < "$inner_result"
+  [[ "$inner_rc" =~ ^[0-9]{1,3}$ ]] && (( 10#$inner_rc <= 255 )) || return 1
+  (( 10#$inner_rc == 0 )) || return "$inner_rc"
   if (( shell_update == 1 )); then
     write_status "VERIFYING GAMEBIRD" 96 0 1 1 "Verifying protected installation" "$remote_commit"
     local verified
-    verified=$(payload_commit "$lower_root$shell_dir/build")
+    verified=$(payload_commit "$lower_root$shell_dir/build" "$lower_root")
     [[ "$verified" == "$remote_commit" ]]
     printf 'commit=%s\nboot_id=%s\n' "$remote_commit" "$boot_id" >"$pending_install.tmp"
     mv -f "$pending_install.tmp" "$pending_install"

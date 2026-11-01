@@ -1,7 +1,7 @@
 [Unit]
 Description=GameBird Shell UI
-After=network-online.target gblibd.service systemd-user-sessions.service gamebird-tv-mode-init.service
-Wants=network-online.target gblibd.service
+After=local-fs.target gblibd.service systemd-user-sessions.service gamebird-tv-mode-init.service
+Wants=gblibd.service
 Requires=gamebird-tv-mode-init.service
 Conflicts=getty@tty1.service
 Before=getty@tty1.service
@@ -15,9 +15,12 @@ ExecStart=/usr/local/lib/gamebird/gbshell-start.sh
 Restart=always
 RestartSec=1
 TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
+# Preserve the initramfs splash until gbshell presents its first full frame.
+TTYReset=no
+TTYVHangup=no
 StandardInput=tty
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

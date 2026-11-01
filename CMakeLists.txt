@@ -1,13 +1,59 @@
 cmake_minimum_required(VERSION 3.16)
-project(gamebird_shell LANGUAGES CXX)
+project(gamebird_shell LANGUAGES C CXX)
 
 include(CTest)
 
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(GBSHELL_BUILD_SERVICES "Build gblibd and gblaunch" ON)
+option(GBSHELL_SPLASH_ONLY "Build only the early boot renderer and its tests" OFF)
+
+# The initramfs renderer needs only libc. Keep it independent of the launcher,
+# PNG decoding, SDL, the catalog, and networking, including at configure time.
+add_library(gbsplash_pixels STATIC services/gbsplash/splash.c)
+target_include_directories(gbsplash_pixels PUBLIC services/gbsplash)
+target_compile_options(gbsplash_pixels PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(gbsplash services/gbsplash/main.c)
+target_link_libraries(gbsplash PRIVATE gbsplash_pixels)
+target_compile_options(gbsplash PRIVATE -Wall -Wextra -Wpedantic)
+
+if(BUILD_TESTING)
+  add_executable(splash_renderer_test tests/splash_renderer_test.c)
+  target_link_libraries(splash_renderer_test PRIVATE gbsplash_pixels)
+  target_compile_options(splash_renderer_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME splash_renderer_test COMMAND splash_renderer_test)
+  add_test(NAME splash_image_validation
+    COMMAND gbsplash --check-image ${CMAKE_CURRENT_SOURCE_DIR}/assets/boot/splash.rgb565)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME splash_cli_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/splash_cli_test.py $<TARGET_FILE:gbsplash>)
+    add_test(NAME shell_display_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/shell_display_test.py)
+    add_test(NAME tv_mode_display_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tv_mode_display_test.py)
+    add_test(NAME boot_splash_install_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/boot_splash_install_test.py)
+    # Pillow is a developer-only dependency for changing artwork. It is not
+    # required on a device installing the committed, preconverted boot image.
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import PIL"
+      RESULT_VARIABLE GBSPLASH_PIL_STATUS OUTPUT_QUIET ERROR_QUIET)
+    if(GBSPLASH_PIL_STATUS EQUAL 0)
+      add_test(NAME boot_splash_asset_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/boot_splash_asset_test.py)
+      set_tests_properties(boot_splash_asset_test PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+  endif()
+endif()
+
+if(GBSHELL_SPLASH_ONLY)
+  return()
+endif()
 
 set(GBSHELL_BUILD_COMMIT "" CACHE STRING "Commit used for this shell build")
 if(NOT GBSHELL_BUILD_COMMIT)

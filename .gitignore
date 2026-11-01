@@ -1,5 +1,7 @@
 /build/
+/build-splash/
 *.o
 *.swp
+__pycache__/
 /data/
 /roms/

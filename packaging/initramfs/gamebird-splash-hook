@@ -1,0 +1,29 @@
+#!/bin/sh
+# Include the existing, working panel stack and a one-frame renderer.
+set -eu
+
+case "${1:-}" in
+  prereqs) exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+. /etc/gamebird/boot-splash.conf
+
+copy_exec /usr/local/lib/gamebird/gbsplash /usr/local/lib/gamebird/gbsplash
+# initramfs-tools' later BusyBox hook replaces common utility names. Keep the
+# GNU timeout whose long options we use at a private, collision-free path.
+copy_exec /usr/bin/timeout /usr/local/lib/gamebird/gbsplash-timeout
+copy_exec /sbin/modprobe /sbin/modprobe
+copy_file config /etc/gamebird/boot-splash.conf /etc/gamebird/boot-splash.conf
+copy_file splash /usr/share/gamebird/boot/splash.rgb565 /usr/share/gamebird/boot/splash.rgb565
+
+# panel-mipi-dbi derives this filename from the panel's Device Tree compatible
+# string. It is not necessarily named after the module, so include it explicitly.
+copy_file firmware "/lib/firmware/$GBSPLASH_FIRMWARE_FILE" "/lib/firmware/$GBSPLASH_FIRMWARE_FILE"
+
+# Copy dependencies now; 00-gamebird-splash loads the observed stack before
+# udev's global coldplug/settle and before ordinary module loading.
+# Built-in modules are already available and need no .ko in the archive.
+for module in $GBSPLASH_MODULES; do
+  manual_add_modules "$module"
+done
