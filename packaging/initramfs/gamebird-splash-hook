@@ -10,7 +10,9 @@ esac
 . /etc/gamebird/boot-splash.conf
 
 copy_exec /usr/local/lib/gamebird/gbsplash /usr/local/lib/gamebird/gbsplash
-copy_exec /usr/bin/timeout /usr/bin/timeout
+# initramfs-tools' later BusyBox hook replaces common utility names. Keep the
+# GNU timeout whose long options we use at a private, collision-free path.
+copy_exec /usr/bin/timeout /usr/local/lib/gamebird/gbsplash-timeout
 copy_exec /sbin/modprobe /sbin/modprobe
 copy_file config /etc/gamebird/boot-splash.conf /etc/gamebird/boot-splash.conf
 copy_file splash /usr/share/gamebird/boot/splash.rgb565 /usr/share/gamebird/boot/splash.rgb565

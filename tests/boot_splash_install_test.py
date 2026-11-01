@@ -52,6 +52,7 @@ class BootSplashInstallTest(unittest.TestCase):
         link.parent.mkdir(parents=True)
         link.symlink_to(self.root / "sys/devices/platform/spi-controller")
         self.make("lib/modules/" + self.version + "/modules.builtin", b"")
+        self.make("usr/bin/timeout", b"fixture GNU timeout")
         self.old_archive = self.archive_bytes(False)
         self.make("boot/initrd.img-" + self.version, self.old_archive)
         self.make("boot/firmware/initramfs7", self.old_archive)
@@ -81,13 +82,13 @@ class BootSplashInstallTest(unittest.TestCase):
         payload = {}
         if installed:
             expected = {splash.BINARY: splash.BINARY, splash.IMAGE: splash.IMAGE,
+                        splash.TIMEOUT: "usr/bin/timeout",
                         splash.CONF: splash.CONF,
                         "scripts/init-top/00-gamebird-splash": splash.RUNTIME,
                         "usr/lib/firmware/vendor/gamepi13.bin": "lib/firmware/vendor/gamepi13.bin"}
             for relative, source in expected.items():
                 entries.append(relative)
                 payload[relative] = base64.b64encode((self.root / source).read_bytes()).decode()
-            entries.append("usr/bin/timeout")
             config = (self.root / splash.CONF).read_text()
             modules = config.split("GBSPLASH_MODULES='", 1)[1].split("'", 1)[0].split()
             for module in modules:
@@ -159,6 +160,21 @@ class BootSplashInstallTest(unittest.TestCase):
         with self.assertRaisesRegex(splash.InstallError, "panel firmware"):
             self.installer.install()
         self.assertEqual((self.root / "boot/firmware/initramfs7").read_bytes(), self.old_archive)
+
+    def test_private_timeout_is_required_even_if_busybox_timeout_exists(self):
+        self.omit = splash.TIMEOUT
+        with self.assertRaisesRegex(splash.InstallError, "gbsplash-timeout"):
+            self.installer.install()
+        self.assertEqual((self.root / "boot/firmware/initramfs7").read_bytes(), self.old_archive)
+
+    def test_archive_timeout_bytes_must_match_gnu_utility(self):
+        self.installer.install()
+        archive = self.root / "boot/firmware/initramfs7"
+        data = json.loads(archive.read_bytes())
+        data["payload"][splash.TIMEOUT] = base64.b64encode(b"BusyBox timeout").decode()
+        archive.write_text(json.dumps(data))
+        with self.assertRaisesRegex(splash.InstallError, "stale bytes.*gbsplash-timeout"):
+            self.installer.validate_archive_bytes(archive, self.installer.state()["panel"])
 
     def test_missing_overlay_hook_never_replaces_working_boot(self):
         self.omit = "init-bottom/overlayroot"

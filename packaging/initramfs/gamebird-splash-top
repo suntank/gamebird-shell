@@ -15,10 +15,10 @@ log=/dev/null
 [ ! -w /dev/kmsg ] || log=/dev/kmsg
 # Module/firmware failure must also be bounded. Names are validated and generated
 # by the installer. The normal path waits only for the real driver initialization.
-/usr/bin/timeout --signal=TERM --kill-after=1 3 /bin/sh -c \
+/usr/local/lib/gamebird/gbsplash-timeout --signal=TERM --kill-after=1 3 /bin/sh -c \
   'for module do modprobe "$module" || exit; done' sh $GBSPLASH_MODULES \
   >/dev/null 2>&1 || :
-/usr/bin/timeout --signal=TERM --kill-after=1 3 /usr/local/lib/gamebird/gbsplash \
+/usr/local/lib/gamebird/gbsplash-timeout --signal=TERM --kill-after=1 3 /usr/local/lib/gamebird/gbsplash \
   --image /usr/share/gamebird/boot/splash.rgb565 --timeout-ms 1200 \
   >/dev/null 2>"$log" || :
 exit 0

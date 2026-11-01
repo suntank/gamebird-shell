@@ -19,6 +19,7 @@ import tempfile
 
 
 BINARY = "usr/local/lib/gamebird/gbsplash"
+TIMEOUT = "usr/local/lib/gamebird/gbsplash-timeout"
 IMAGE = "usr/share/gamebird/boot/splash.rgb565"
 CONF = "etc/gamebird/boot-splash.conf"
 HOOK = "etc/initramfs-tools/hooks/gamebird-splash"
@@ -284,7 +285,7 @@ class Installer:
             return relative in normalized or "usr/" + relative in normalized
 
         if require_payload:
-            for path in (BINARY, IMAGE, CONF, "usr/bin/timeout", "scripts/init-top/00-gamebird-splash"):
+            for path in (BINARY, IMAGE, CONF, TIMEOUT, "scripts/init-top/00-gamebird-splash"):
                 if not included(path):
                     raise InstallError(f"{archive.name} is missing {path}.")
             if not included("lib/firmware/" + config["firmware"]):
@@ -333,7 +334,7 @@ class Installer:
     def validate_archive_bytes(self, archive, config):
         # Names alone cannot prove that an old, same-named splash was replaced.
         # Extract onto the persistent root, not the handheld's small RAM overlay.
-        expected = {BINARY: BINARY, IMAGE: IMAGE, CONF: CONF,
+        expected = {BINARY: BINARY, IMAGE: IMAGE, CONF: CONF, TIMEOUT: "usr/bin/timeout",
                     "scripts/init-top/00-gamebird-splash": RUNTIME,
                     "lib/firmware/" + config["firmware"]: "lib/firmware/" + config["firmware"]}
         parent = self.path("var/lib/gamebird")
