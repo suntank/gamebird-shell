@@ -134,7 +134,7 @@ class BootSplashInstallTest(unittest.TestCase):
         self.assertEqual((self.root / splash.BOOT_CONFIG).read_bytes(), self.original_config)
         self.assertEqual((self.root / splash.BINARY).read_bytes(), (self.build / "gbsplash").read_bytes())
         self.assertIn("TTYReset=no", (self.root / splash.DROPIN).read_text())
-        self.assertEqual(len((self.root / splash.RECEIPT).read_text().splitlines()), 8)
+        self.assertEqual(len((self.root / splash.RECEIPT).read_text().splitlines()), 10)
         self.assertTrue(any(Path(call[0]).name == "unmkinitramfs" for call in self.calls))
         self.assertFalse(any(Path(call[0]).name in ("mount", "systemctl", "reboot") for call in self.calls))
 
@@ -210,6 +210,31 @@ class BootSplashInstallTest(unittest.TestCase):
         (self.root / "sys/bus/spi/devices/spi0.0/driver").unlink()
         with self.assertRaisesRegex(splash.InstallError, "not bound"):
             self.installer.install()
+
+    def test_manual_install_replaces_network_wait_units_and_restores_originals(self):
+        originals = {}
+        for relative in (splash.SHELL_SERVICE, splash.LIBRARY_SERVICE):
+            originals[relative] = b"[Unit]\nAfter=network-online.target\nWants=network-online.target\n"
+            self.make(relative, originals[relative])
+        self.installer.install()
+        for relative in originals:
+            self.assertNotIn("network-online.target", (self.root / relative).read_text())
+        self.installer.install()
+        self.installer.uninstall()
+        for relative, original in originals.items():
+            self.assertEqual((self.root / relative).read_bytes(), original)
+
+    def test_upgrade_captures_new_service_originals(self):
+        self.installer.install()
+        state = self.installer.state()
+        for relative in (splash.SHELL_SERVICE, splash.LIBRARY_SERVICE):
+            del state["originals"][relative]
+            self.make(relative, b"original service before upgrade")
+        self.make(splash.STATE_DIR + "/state.json", json.dumps(state).encode())
+        self.installer.install()
+        self.installer.uninstall()
+        for relative in (splash.SHELL_SERVICE, splash.LIBRARY_SERVICE):
+            self.assertEqual((self.root / relative).read_bytes(), b"original service before upgrade")
 
     def test_conditional_custom_boot_setting_is_not_guessed(self):
         original = b"[pi02]\nauto_initramfs=1\n"

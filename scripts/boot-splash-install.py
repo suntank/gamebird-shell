@@ -27,7 +27,10 @@ DROPIN = "etc/systemd/system/gbshell.service.d/10-boot-splash.conf"
 LAUNCHER = "usr/local/lib/gamebird/gbshell-start.sh"
 TV_MANAGER = "usr/local/lib/gamebird/tv-mode-manager.sh"
 RECEIPT = "etc/gamebird/boot-splash.sha256"
-OWNED_FILES = (BINARY, IMAGE, CONF, HOOK, RUNTIME, DROPIN, LAUNCHER, TV_MANAGER, RECEIPT)
+SHELL_SERVICE = "etc/systemd/system/gbshell.service"
+LIBRARY_SERVICE = "etc/systemd/system/gblibd.service"
+LEGACY_OWNED_FILES = (BINARY, IMAGE, CONF, HOOK, RUNTIME, DROPIN, LAUNCHER, TV_MANAGER, RECEIPT)
+OWNED_FILES = (*LEGACY_OWNED_FILES, SHELL_SERVICE, LIBRARY_SERVICE)
 STATE_DIR = "var/lib/gamebird/boot-splash"
 BOOT_CONFIG = "boot/firmware/config.txt"
 BOOT_BLOCK = ("\n# BEGIN GAMEBIRD BOOT SPLASH\n[all]\nauto_initramfs=1\n"
@@ -104,7 +107,9 @@ class Installer:
             raise InstallError("Unrecognized splash installation state; refusing to overwrite it.")
         panel, originals = data.get("panel"), data.get("originals")
         if (not isinstance(data.get("owns_boot_block"), bool)
-                or not isinstance(originals, dict) or set(originals) != set(OWNED_FILES)
+                or not isinstance(originals, dict)
+                or not set(LEGACY_OWNED_FILES).issubset(originals)
+                or not set(originals).issubset(OWNED_FILES)
                 or any(not isinstance(value, bool) for value in originals.values())
                 or not isinstance(panel, dict) or not isinstance(panel.get("modules"), list)
                 or not panel["modules"] or not isinstance(panel.get("firmware"), str)
@@ -455,6 +460,7 @@ class Installer:
         self.run(binary, "--check-image", image)
         for relative in ("packaging/initramfs/gamebird-splash-hook", "packaging/initramfs/gamebird-splash-top",
                          "packaging/systemd/gbshell.service.d/10-boot-splash.conf",
+                         "packaging/systemd/gbshell.service", "packaging/systemd/gblibd.service",
                          "scripts/gbshell-start.sh", "scripts/tv-mode-manager.sh"):
             if not (self.source / relative).is_file():
                 raise InstallError(f"Installer source is missing {relative}.")
@@ -464,16 +470,20 @@ class Installer:
         def operation():
             nonlocal state
             if state is None:
-                originals = {}
-                for relative in OWNED_FILES:
-                    target = self.path(relative)
-                    present = target.exists() or target.is_symlink()
-                    originals[relative] = present
-                    if present:
-                        saved = self.path(STATE_DIR + "/original/" + relative)
-                        saved.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(target, saved, follow_symlinks=False)
-                state = {"format": 1, "originals": originals}
+                state = {"format": 1, "originals": {}}
+            # Capture newly owned paths on upgrades without replacing the first
+            # installation's originals. Manual installs need the same offline
+            # startup units as the full system updater.
+            for relative in OWNED_FILES:
+                if relative in state["originals"]:
+                    continue
+                target = self.path(relative)
+                present = target.exists() or target.is_symlink()
+                state["originals"][relative] = present
+                if present:
+                    saved = self.path(STATE_DIR + "/original/" + relative)
+                    saved.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target, saved, follow_symlinks=False)
             state.update(owns_boot_block=plan["owns_boot_block"], panel={
                 "modules": panel["modules"], "firmware": panel["firmware"]})
             for source, target, mode in (
@@ -483,6 +493,8 @@ class Installer:
                 (self.source / "packaging/systemd/gbshell.service.d/10-boot-splash.conf", DROPIN, 0o644),
                 (self.source / "scripts/gbshell-start.sh", LAUNCHER, 0o755),
                 (self.source / "scripts/tv-mode-manager.sh", TV_MANAGER, 0o755),
+                (self.source / "packaging/systemd/gbshell.service", SHELL_SERVICE, 0o644),
+                (self.source / "packaging/systemd/gblibd.service", LIBRARY_SERVICE, 0o644),
             ):
                 atomic_write(self.path(target), source.read_bytes(), mode)
             atomic_write(self.path(CONF), panel["config"].encode())
@@ -509,7 +521,7 @@ class Installer:
         overlay = self.overlay_required()
 
         def operation():
-            for relative in OWNED_FILES:
+            for relative in state["originals"]:
                 target = self.path(relative)
                 if target.exists() or target.is_symlink():
                     target.unlink()

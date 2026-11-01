@@ -80,6 +80,7 @@ The installed files are:
 | `/etc/initramfs-tools/hooks/gamebird-splash` | Copies the renderer, image, firmware, and dependencies into rebuilt boot images |
 | `/etc/initramfs-tools/scripts/init-top/00-gamebird-splash` | Draws the splash during early boot |
 | `/etc/systemd/system/gbshell.service.d/10-boot-splash.conf` | Preserves the display during the handoff to an existing shell service |
+| `/etc/systemd/system/gbshell.service` and `/etc/systemd/system/gblibd.service` | Starts the shell and library daemon without waiting for networking |
 | `/usr/local/lib/gamebird/gbshell-start.sh` | Selects the handheld or HDMI framebuffer by hardware identity |
 | `/usr/local/lib/gamebird/tv-mode-manager.sh` | Keeps RetroArch on the active display despite changed DRM card numbering |
 | `/etc/gamebird/boot-splash.sha256` | Integrity receipt for installed files |

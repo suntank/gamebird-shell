@@ -133,6 +133,8 @@ for item in json.load(sys.stdin).get("filesystems", []):
      "$project_dir/packaging/initramfs/gamebird-splash-top" "$stage/packaging/initramfs/"
   cp "$project_dir/packaging/systemd/gbshell.service.d/10-boot-splash.conf" \
     "$stage/packaging/systemd/gbshell.service.d/"
+  cp "$project_dir/packaging/systemd/gbshell.service" \
+     "$project_dir/packaging/systemd/gblibd.service" "$stage/packaging/systemd/"
   if [[ "$action" == install ]]; then
     cp "$build_dir/gbsplash" "$stage/build/gbsplash"
     cp "$project_dir/assets/boot/splash.rgb565" "$stage/assets/boot/splash.rgb565"
