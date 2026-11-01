@@ -186,6 +186,37 @@ Or pin input device explicitly:
 sudo ./build/gbshell --presenter fbdev --fbdev /dev/fb1 --input-evdev /dev/input/event2
 ```
 
+## Early boot screen
+
+The supplied Game Bird artwork in `assets/ui/splash.png` is also installed as
+a small preconverted boot image. A standalone `gbsplash` program draws it from
+the initramfs as soon as the SPI panel is available, before normal system
+services, networking, library loading, or GameBird Shell. It leaves the frame
+displayed until the launcher draws its first menu, with no minimum splash time.
+
+The protected system updater builds and installs the splash with shell updates.
+For a manual installation on the handheld, build only the small renderer and
+then run its installer:
+
+```bash
+cmake -S . -B build-splash -DGBSHELL_SPLASH_ONLY=ON -DBUILD_TESTING=OFF
+cmake --build build-splash --target gbsplash -j2
+sudo ./scripts/install-boot-splash.sh --build-dir ./build-splash
+sudo reboot
+```
+
+The installer handles the protected root and firmware mounts, includes the
+panel's actual drivers and initialization firmware, and verifies the generated
+initramfs before activating boot settings. It does not reboot automatically.
+The splash is optional at runtime: missing hardware or a failed draw does not
+stop the rest of boot. Both launcher services start without waiting for Wi-Fi.
+The launcher and TV manager select displays by hardware identity so that
+initializing the handheld screen earlier does not redirect HDMI output.
+
+See [boot splash installation and recovery](docs/boot-splash.md) for verification,
+removal, artwork regeneration, and cold-boot timing checks. Actual first-pixel
+time and the transition to the launcher require a test on the handheld.
+
 ## Waveshare GamePi13 controls
 
 The handheld's twelve active-low GPIO switches are described by

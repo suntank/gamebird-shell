@@ -30,7 +30,7 @@ class UpdaterTest(unittest.TestCase):
         # the fixture, including when CI runs these tests as root.
         for path in ("/home/gamebird/gamebird-shell", "/data/gamebird-shell/config",
                      "/usr/local/lib/gamebird", "/etc/sudoers.d", "/etc/systemd/system",
-                     "/usr/sbin/policy-rc.d"):
+                     "/etc/gamebird", "/usr/sbin/policy-rc.d"):
             script = script.replace(path, str(self.root / "protected") + path)
         self.script = self.root / "updater.sh"
         self.script.write_text(script)
@@ -39,8 +39,9 @@ class UpdaterTest(unittest.TestCase):
         self.mock("apt-get", "exit 0")
         self.mock("curl", 'printf \'{"sha":"%s"}\\n\' ' + "a" * 40)
         self.mock("mountpoint", "exit 1")
-        for command in ("mount", "umount", "sync", "sleep", "overlayroot-chroot"):
+        for command in ("mount", "umount", "sync", "sleep"):
             self.mock(command, "exit 0")
+        self.mock_chroot()
         self.mock("systemctl", f'echo "$*" >> "{self.commands}"')
         self.mock("chown", "exit 0")
 
@@ -48,6 +49,11 @@ class UpdaterTest(unittest.TestCase):
         path = self.bin / name
         path.write_text("#!/bin/bash\n" + body + "\n")
         path.chmod(0o755)
+
+    def mock_chroot(self, body="", status=0):
+        self.mock("overlayroot-chroot", body +
+                  f'\nmkdir -p "{self.state}/work"\nprintf "%s\\n" {status} > '
+                  f'"{self.state}/work/inner-install-result"\nexit 0')
 
     def run_updater(self, *args):
         return subprocess.run(["bash", str(self.script), *args], env=self.env,
@@ -62,7 +68,7 @@ class UpdaterTest(unittest.TestCase):
     def payload(self, directory, commit="a" * 40):
         directory.mkdir(parents=True, exist_ok=True)
         hashes = []
-        for name in ("gbshell", "gblibd", "gblaunch", "gbhud"):
+        for name in ("gbshell", "gblibd", "gblaunch", "gbhud", "gbsplash"):
             contents = f"#!/bin/sh\necho 'GameBird Shell {commit}'\n".encode()
             (directory / name).write_bytes(contents)
             (directory / name).chmod(0o755)
@@ -71,6 +77,39 @@ class UpdaterTest(unittest.TestCase):
         (directory / "shell-commit").write_bytes(identity)
         hashes.append(f"{hashlib.sha256(identity).hexdigest()}  shell-commit\n")
         (directory / "shell-payload.sha256").write_text("".join(hashes))
+
+    def boot_payload(self, directory, root=Path("/")):
+        """Bind a boot-file receipt to a payload, optionally in a lower root."""
+        relative = str(self.root / "boot-files/splash.rgb565").lstrip("/")
+        image = root / relative
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"boot image fixture")
+        receipt = f"{hashlib.sha256(image.read_bytes()).hexdigest()}  {relative}\n"
+        (directory / "boot-splash.sha256").write_text(receipt)
+        with (directory / "shell-payload.sha256").open("a") as stream:
+            stream.write(f"{hashlib.sha256(receipt.encode()).hexdigest()}  boot-splash.sha256\n")
+        return image
+
+    def inner_source(self):
+        source = self.root / "source"
+        for relative in ("config/defaults.json", "scripts/gamebird-updater.sh", "scripts/gbshell-start.sh",
+                         "scripts/tv-mode-manager.sh",
+                         "packaging/sudoers/gamebird-update", "packaging/systemd/gamebird-update.service",
+                         "assets/boot/splash.rgb565"):
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture")
+        receipt_dir = self.root / "protected/etc/gamebird"
+        # Exercise updater sequencing without changing host boot files. The
+        # installer itself has a separate isolated integration suite.
+        (source / "scripts/install-boot-splash.sh").write_text(
+            f'#!/bin/bash\nmkdir -p "{receipt_dir}"\n'
+            f'sha256sum "{source}/assets/boot/splash.rgb565" > "{receipt_dir}/boot-splash.sha256"\n'
+        )
+        seed = self.root / "build-seed"
+        self.payload(seed)
+        self.mock("cmake", f'mkdir -p "{self.state}/work/build"; cp "{seed}/"* "{self.state}/work/build/"')
+        return source
 
     def pending(self, commit="a" * 40, boot="previous-boot"):
         (self.state / "pending-shell-install").write_text(f"commit={commit}\nboot_id={boot}\n")
@@ -81,7 +120,7 @@ class UpdaterTest(unittest.TestCase):
         self.mock("tar", f'mkdir -p "{self.state}/work/source/scripts"; '
                   f'touch "{self.state}/work/source/CMakeLists.txt" '
                   f'"{self.state}/work/source/scripts/gamebird-updater.sh"')
-        self.mock("overlayroot-chroot", f'echo "$*" >> "{self.commands}"')
+        self.mock_chroot(f'echo "$*" >> "{self.commands}"')
 
     def test_new_commit_is_available(self):
         result = self.run_updater("check")
@@ -109,6 +148,23 @@ class UpdaterTest(unittest.TestCase):
         (self.shell / "build/gblaunch").write_text("older executable")
         self.assertEqual(self.run_updater("check").returncode, 0)
         self.assertEqual(self.status()["shell_update"], "1")
+        self.assertEqual(self.status()["installed_commit"], "")
+
+    def test_changed_boot_image_invalidates_installed_payload(self):
+        self.payload(self.shell / "build")
+        image = self.boot_payload(self.shell / "build")
+        self.assertEqual(self.run_updater("check").returncode, 0)
+        self.assertEqual(self.status()["phase"], "CURRENT")
+        image.write_bytes(b"altered image")
+        self.assertEqual(self.run_updater("check").returncode, 0)
+        self.assertEqual(self.status()["installed_commit"], "")
+        self.assertEqual(self.status()["shell_update"], "1")
+
+    def test_boot_receipt_is_itself_bound_to_build_identity(self):
+        self.payload(self.shell / "build")
+        self.boot_payload(self.shell / "build")
+        (self.shell / "build/boot-splash.sha256").write_text("different receipt\n")
+        self.assertEqual(self.run_updater("check").returncode, 0)
         self.assertEqual(self.status()["installed_commit"], "")
 
     def test_interrupted_receipt_cannot_mislabel_binaries(self):
@@ -176,18 +232,28 @@ class UpdaterTest(unittest.TestCase):
         self.assertIn("work/source/scripts/gamebird-updater.sh inner", self.commands.read_text())
         self.assertIn("reboot", self.commands.read_text())
 
+    def test_protected_boot_receipt_uses_lower_root(self):
+        self.prepare_shell_install()
+        protected_build = Path(str(self.root / "lower") + str(self.shell)) / "build"
+        self.payload(protected_build)
+        self.boot_payload(protected_build, self.root / "lower")
+        result = self.run_updater("install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.status()["phase"], "REBOOTING")
+
+    def test_failed_boot_payload_verification_prevents_reboot(self):
+        self.prepare_shell_install()
+        protected_build = Path(str(self.root / "lower") + str(self.shell)) / "build"
+        self.payload(protected_build)
+        image = self.boot_payload(protected_build, self.root / "lower")
+        image.unlink()
+        result = self.run_updater("install")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.status()["phase"], "ERROR")
+        self.assertNotIn("reboot", self.commands.read_text())
+
     def test_inner_install_stamps_only_completed_payload(self):
-        source = self.root / "source"
-        for relative in ("config/defaults.json", "scripts/gamebird-updater.sh", "scripts/gbshell-start.sh",
-                         "packaging/sudoers/gamebird-update", "packaging/systemd/gamebird-update.service"):
-            path = source / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("fixture")
-        self.payload(self.state / "work/build")
-        # Configuring removes the build tree first; mock CMake regenerates it.
-        seed = self.root / "build-seed"
-        self.payload(seed)
-        self.mock("cmake", f'mkdir -p "{self.state}/work/build"; cp "{seed}/"* "{self.state}/work/build/"')
+        source = self.inner_source()
         result = self.run_updater("inner", "0", "1", "a" * 40, str(source))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.shell / "build/shell-commit").read_text().strip(), "a" * 40)
@@ -198,6 +264,14 @@ class UpdaterTest(unittest.TestCase):
         self.mock("systemctl", "exit 46")
         result = self.run_updater("inner", "0", "1", "a" * 40, str(source))
         self.assertEqual(result.returncode, 46, result.stderr)
+        self.assertFalse((self.shell / "build/shell-commit").exists())
+
+    def test_failed_boot_install_does_not_stamp_payload(self):
+        source = self.inner_source()
+        (source / "scripts/install-boot-splash.sh").write_text("#!/bin/bash\nexit 47\n")
+        result = self.run_updater("inner", "0", "1", "a" * 40, str(source))
+        self.assertEqual(result.returncode, 47, result.stderr)
+        self.assertEqual(self.status()["phase"], "ERROR")
         self.assertFalse((self.shell / "build/shell-commit").exists())
 
     def test_invalid_channel_does_not_claim_current(self):
@@ -240,6 +314,22 @@ class UpdaterTest(unittest.TestCase):
         self.assertEqual(self.status()["phase"], "ERROR")
         self.assertFalse(self.commands.exists())
 
+    def test_chroot_cleanup_cannot_mask_inner_failure(self):
+        self.prepare_install()
+        self.mock_chroot(status=48)
+        result = self.run_updater("install")
+        self.assertEqual(result.returncode, 48, result.stderr)
+        self.assertEqual(self.status()["phase"], "ERROR")
+        self.assertFalse(self.commands.exists())
+
+    def test_missing_inner_result_is_not_success(self):
+        self.prepare_install()
+        self.mock("overlayroot-chroot", "exit 0")
+        result = self.run_updater("install")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.status()["phase"], "ERROR")
+        self.assertFalse(self.commands.exists())
+
     def test_failed_mount_does_not_continue(self):
         self.prepare_install()
         self.mock("mount", '[[ "$*" == "-o remount,rw /boot/firmware" ]] && exit 44; exit 0')
@@ -254,7 +344,7 @@ class UpdaterTest(unittest.TestCase):
         resolver.parent.mkdir(parents=True)
         resolver.write_text("nameserver 127.0.0.53\n")
         self.mock("mount", f'echo "mount $*" >> "{self.commands}"')
-        self.mock("overlayroot-chroot", f'echo "chroot $*" >> "{self.commands}"')
+        self.mock_chroot(f'echo "chroot $*" >> "{self.commands}"')
         result = self.run_updater("install")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.commands.read_text()
