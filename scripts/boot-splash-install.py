@@ -455,9 +455,8 @@ class Installer:
         plan = self.boot_plan(state)
         panel = self.panel_config()
         binary, image = self.build / "gbsplash", self.source / "assets/boot/splash.rgb565"
-        if not binary.is_file() or not os.access(binary, os.X_OK):
+        if not binary.is_file() or not binary.stat().st_mode & 0o111:
             raise InstallError(f"Build the gbsplash target first: {binary}")
-        self.run(binary, "--check-image", image)
         for relative in ("packaging/initramfs/gamebird-splash-hook", "packaging/initramfs/gamebird-splash-top",
                          "packaging/systemd/gbshell.service.d/10-boot-splash.conf",
                          "packaging/systemd/gbshell.service", "packaging/systemd/gblibd.service",
@@ -498,6 +497,10 @@ class Installer:
             ):
                 atomic_write(self.path(target), source.read_bytes(), mode)
             atomic_write(self.path(CONF), panel["config"].encode())
+            # /run is commonly mounted noexec on the protected handheld. Run
+            # the copied native binary from the persistent root, within the
+            # rollback transaction, rather than executing its staged input.
+            self.run(self.path(BINARY), "--check-image", self.path(IMAGE))
             self.rebuild()
             self.archive_validation(plan, panel, overlay)
             if self.path("boot/firmware/cmdline.txt").read_bytes() != before_cmdline:

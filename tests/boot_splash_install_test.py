@@ -147,6 +147,13 @@ class BootSplashInstallTest(unittest.TestCase):
         self.assertFalse((self.root / splash.BINARY).exists())
         self.assertFalse((self.root / splash.STATE_DIR).exists())
 
+    def test_staged_binary_need_not_be_executable_on_noexec_mount(self):
+        with mock.patch.object(splash.os, "access", return_value=False):
+            self.installer.install()
+        checks = [call for call in self.calls if Path(call[0]).name == "gbsplash"]
+        self.assertEqual(checks, [[str(self.root / splash.BINARY), "--check-image",
+                                   str(self.root / splash.IMAGE)]])
+
     def test_missing_firmware_in_archive_rolls_back(self):
         self.omit = "firmware/"
         with self.assertRaisesRegex(splash.InstallError, "panel firmware"):
